@@ -91,3 +91,8 @@ class TransactionAdmin(admin.ModelAdmin):
         'created_at',
         'updated_at',
     )
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is None:
+            return ('budget_bucket', 'created_at', 'updated_at')
+        return self.readonly_fields
