@@ -9,8 +9,11 @@ def initialize_review_state(apps, schema_editor):
     database = schema_editor.connection.alias
 
     Transaction.objects.using(database).filter(
-        classification__in=('UNKNOWN', 'INCOME', 'EXCLUDED'),
+        classification__in=('INCOME', 'EXCLUDED'),
     ).update(subcategory=None, budget_bucket='', review_status='NOT_REQUIRED')
+    Transaction.objects.using(database).filter(
+        classification='UNKNOWN',
+    ).update(subcategory=None, budget_bucket='', review_status='PENDING')
     Transaction.objects.using(database).filter(
         classification__in=('EXPENSE', 'REFUND'),
         subcategory__isnull=False,
