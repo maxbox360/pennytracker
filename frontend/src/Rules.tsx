@@ -194,7 +194,7 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
   }
 
   const assignable = categories.filter((category) => (
-    category.is_active && category.budget_bucket !== 'SAVINGS'
+    category.is_active && (category.budget_bucket === 'NEEDS' || category.budget_bucket === 'WANTS')
   ))
   const currentUnavailable = categories.find((category) => (
     category.id === Number(draft.subcategory)
