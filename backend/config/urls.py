@@ -31,7 +31,7 @@ router = DefaultRouter()
 router.register('accounts', AccountViewSet)
 router.register('import-batches', ImportBatchViewSet)
 router.register('subcategories', SubcategoryViewSet)
-router.register('transactions', TransactionViewSet)
+router.register('transactions', TransactionViewSet, basename='transaction')
 
 urlpatterns = [
     path('admin/', admin.site.urls),

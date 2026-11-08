@@ -28,10 +28,17 @@ Implement one milestone at a time; keep the application runnable and verify each
 - Block exact file re-import per account by SHA-256. Overlapping non-identical imports remain a known limitation for the future duplicate/review workflow; do not silently deduplicate similar rows.
 - Test with synthetic sanitized fixtures only; exclude root-level CSV exports from Git and Docker build contexts.
 
-## Milestone 3 — Categorization and review
+## Milestone 3 — Overlap protection, ledger review, and manual classification (complete)
 
-- Add transparent editable categorization rules, merchant cleanup, review queue, and practical bulk actions.
-- Make refunds and transfer candidates reviewable; preserve raw descriptions and imported amounts.
+- Extend ImportBatch with already-represented and possible-duplicate counts; preview and confirm overlapping imports with account-scoped, multiplicity-aware matching.
+- Fingerprint the current format by transaction date, posted date when available, signed Decimal amount, source type, and normalized raw description (trim/collapse whitespace/case-fold); do not use filename, merchant, batch, or source row. Call matches `already represented`, not certain duplicates.
+- Preserve candidate transaction links for possible duplicates and show comparison context in Review. Import possible duplicates into Review; never silently drop excess identical occurrences.
+- Add explicit duplicate states (unresolved, distinct, confirmed duplicate), separate from classification and review status. Keep confirmed duplicates stored and exclude them from future totals.
+- Add `PENDING`, `REVIEWED`, and `NOT_REQUIRED` review status, derived attention reasons, deterministic completion rules, and validation that returns edited transactions to PENDING when required.
+- Support manual classification, eligible subcategory assignment with bucket snapshots, clean merchant and notes edits, Review filters, and atomic bulk classification/category/mark-reviewed actions.
+- Keep imported source fields immutable in normal API edits and read-only in Django admin. Use `apiFetch` for every frontend mutation.
+- Do not add automatic categorization rules, reporting, refund linking, transfer pairing, savings calculations, debt, recurring bills, or subscriptions.
+- Verified with multiplicity, review-rule, atomic bulk-action, source-immutability, and duplicate-resolution tests; frontend build and Docker Compose API/proxy/CSRF smoke checks pass.
 
 ## Milestone 4 — Accounting and monthly reporting
 

@@ -43,14 +43,19 @@
 
 .nav-item {
   display: flex;
+  width: 100%;
   min-height: 42px;
   align-items: center;
   gap: 12px;
+  border: 0;
   padding: 0 12px;
+  background: transparent;
   border-radius: 8px;
   color: #5f6879;
+  cursor: pointer;
   font-size: 14px;
   font-weight: 570;
+  text-align: left;
   text-decoration: none;
 }
 
@@ -275,6 +280,205 @@
   font-size: 12px;
 }
 
+.ledger-filters,
+.bulk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid #edf0f4;
+  background: #fff;
+}
+
+.ledger-filters label,
+.bulk-toolbar label,
+.transaction-editor label,
+.duplicate-actions label {
+  display: grid;
+  min-width: 130px;
+  gap: 5px;
+  color: #596477;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.ledger-filters input,
+.ledger-filters select,
+.bulk-toolbar select,
+.transaction-editor input,
+.transaction-editor select,
+.transaction-editor textarea,
+.duplicate-actions select {
+  min-height: 34px;
+  border: 1px solid #dfe4eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #394457;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.ledger-filters .search-filter {
+  flex: 1;
+}
+
+.bulk-toolbar {
+  align-items: center;
+  background: #f9fbfa;
+}
+
+.bulk-toolbar strong {
+  margin-right: auto;
+  color: #394457;
+  font-size: 12px;
+}
+
+.bulk-toolbar button,
+.row-actions button,
+.duplicate-actions button {
+  min-height: 32px;
+  border: 1px solid #dfe4eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #394457;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 9px;
+}
+
+.bulk-toolbar button:hover,
+.row-actions button:hover,
+.duplicate-actions button:hover:not(:disabled) {
+  border-color: #b6c4d2;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.review-reasons,
+.candidate-summary {
+  display: block;
+  max-width: 300px;
+  margin-top: 5px;
+  color: #8a641e;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.table-notice {
+  margin: 0;
+  padding: 10px 20px;
+  background: #e8f6ef;
+  color: #24744d;
+  font-size: 12px;
+}
+
+.overlap-status {
+  display: inline-flex;
+  border-radius: 99px;
+  background: #e8f6ef;
+  color: #24744d;
+  font-size: 10px;
+  font-weight: 650;
+  padding: 5px 8px;
+}
+
+.overlap-status--already_represented {
+  background: #eef0f4;
+  color: #646d7e;
+}
+
+.overlap-status--possible_duplicate {
+  background: #fff3dc;
+  color: #8a641e;
+}
+
+.candidate-summary {
+  max-width: 360px;
+  color: #687386;
+}
+
+.detail-row td {
+  padding: 18px 20px;
+  background: #fafbfc;
+  white-space: normal;
+}
+
+.transaction-editor {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  align-items: end;
+  gap: 12px;
+}
+
+.transaction-editor .notes-editor {
+  grid-column: span 2;
+}
+
+.transaction-editor textarea {
+  resize: vertical;
+}
+
+.editor-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.duplicate-context {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #e6e9ef;
+}
+
+.duplicate-context h3 {
+  margin: 0;
+  color: #354156;
+  font-size: 13px;
+}
+
+.duplicate-context > p {
+  margin: 6px 0 12px;
+  color: #7a8495;
+  font-size: 11px;
+}
+
+.candidate-row {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr 1.5fr 1fr;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid #edf0f4;
+  color: #4a5568;
+  font-size: 11px;
+}
+
+.duplicate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.duplicate-actions button:last-child {
+  border-color: #a75454;
+  color: #a03d3d;
+}
+
+.bulk-toolbar button:disabled,
+.duplicate-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .table-scroll {
   overflow-x: auto;
 }
@@ -491,6 +695,25 @@ td.amount-cell {
     align-items: stretch;
     flex-direction: column;
     padding: 18px;
+  }
+
+  .ledger-filters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ledger-filters label,
+  .ledger-filters .search-filter {
+    min-width: 100%;
+  }
+
+  .transaction-editor {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .candidate-row {
+    grid-template-columns: 1fr;
+    gap: 5px;
   }
 
   .import-heading {

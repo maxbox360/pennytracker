@@ -1,5 +1,6 @@
 from django.db import models
 from django.db.models import Q
+from django.core.exceptions import ValidationError
 
 
 class BudgetBucket(models.TextChoices):
@@ -15,6 +16,19 @@ class TransactionClassification(models.TextChoices):
     REFUND = 'REFUND', 'Refund'
     TRANSFER = 'TRANSFER', 'Transfer'
     EXCLUDED = 'EXCLUDED', 'Excluded'
+
+
+class ReviewStatus(models.TextChoices):
+    PENDING = 'PENDING', 'Pending'
+    REVIEWED = 'REVIEWED', 'Reviewed'
+    NOT_REQUIRED = 'NOT_REQUIRED', 'Not required'
+
+
+class DuplicateResolution(models.TextChoices):
+    NONE = 'NONE', 'Not a possible duplicate'
+    UNRESOLVED = 'UNRESOLVED', 'Unresolved'
+    DISTINCT = 'DISTINCT', 'Distinct transaction'
+    CONFIRMED_DUPLICATE = 'CONFIRMED_DUPLICATE', 'Confirmed duplicate'
 
 
 class Account(models.Model):
@@ -46,6 +60,8 @@ class ImportBatch(models.Model):
     format_identifier = models.CharField(max_length=50)
     source_row_count = models.PositiveIntegerField()
     imported_row_count = models.PositiveIntegerField()
+    already_represented_row_count = models.PositiveIntegerField(default=0)
+    possible_duplicate_row_count = models.PositiveIntegerField(default=0)
     earliest_transaction_date = models.DateField(null=True, blank=True)
     latest_transaction_date = models.DateField(null=True, blank=True)
     imported_at = models.DateTimeField(auto_now_add=True)
@@ -83,6 +99,8 @@ class Subcategory(models.Model):
 
 class Transaction(models.Model):
     Classification = TransactionClassification
+    ReviewStatus = ReviewStatus
+    DuplicateResolution = DuplicateResolution
 
     account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name='transactions')
     subcategory = models.ForeignKey(
@@ -112,6 +130,29 @@ class Transaction(models.Model):
         default=Classification.UNKNOWN,
     )
     budget_bucket = models.CharField(max_length=10, choices=BudgetBucket.choices, blank=True)
+    review_status = models.CharField(
+        max_length=15,
+        choices=ReviewStatus.choices,
+        default=ReviewStatus.PENDING,
+    )
+    duplicate_resolution = models.CharField(
+        max_length=20,
+        choices=DuplicateResolution.choices,
+        default=DuplicateResolution.NONE,
+    )
+    duplicate_candidates = models.ManyToManyField(
+        'self',
+        symmetrical=False,
+        related_name='possible_duplicate_for',
+        blank=True,
+    )
+    duplicate_of = models.ForeignKey(
+        'self',
+        on_delete=models.PROTECT,
+        related_name='confirmed_duplicate_transactions',
+        null=True,
+        blank=True,
+    )
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -127,6 +168,14 @@ class Transaction(models.Model):
                 condition=Q(classification__in=TransactionClassification.values),
                 name='valid_transaction_classification',
             ),
+            models.CheckConstraint(
+                condition=Q(review_status__in=ReviewStatus.values),
+                name='valid_transaction_review_status',
+            ),
+            models.CheckConstraint(
+                condition=Q(duplicate_resolution__in=DuplicateResolution.values),
+                name='valid_transaction_duplicate_resolution',
+            ),
             models.UniqueConstraint(
                 fields=('import_batch', 'source_row'),
                 condition=Q(import_batch__isnull=False),
@@ -134,21 +183,113 @@ class Transaction(models.Model):
             ),
         ]
 
+    @staticmethod
+    def eligible_buckets(classification):
+        if classification in (TransactionClassification.EXPENSE, TransactionClassification.REFUND):
+            return {BudgetBucket.NEEDS, BudgetBucket.WANTS}
+        if classification == TransactionClassification.TRANSFER:
+            return {BudgetBucket.SAVINGS}
+        return set()
+
+    def review_blockers(self):
+        if self.duplicate_resolution == DuplicateResolution.CONFIRMED_DUPLICATE:
+            return []
+        blockers = []
+        if self.duplicate_resolution == DuplicateResolution.UNRESOLVED:
+            blockers.append('UNRESOLVED_DUPLICATE')
+        if self.classification == TransactionClassification.UNKNOWN:
+            blockers.append('UNKNOWN_CLASSIFICATION')
+        if self.classification in (
+            TransactionClassification.EXPENSE,
+            TransactionClassification.REFUND,
+        ):
+            if not self.subcategory_id or self.budget_bucket not in self.eligible_buckets(self.classification):
+                blockers.append('SUBCATEGORY_REQUIRED')
+        return blockers
+
+    def review_reasons(self):
+        reasons = self.review_blockers()
+        if self.review_status == ReviewStatus.PENDING:
+            if self.classification == TransactionClassification.TRANSFER:
+                reasons.append('TRANSFER_REQUIRES_REVIEW')
+            elif not reasons:
+                reasons.append('READY_TO_MARK_REVIEWED')
+        return reasons
+
+    def mark_reviewed(self):
+        blockers = self.review_blockers()
+        if blockers:
+            raise ValidationError({
+                'review_status': f'This transaction cannot be marked reviewed: {", ".join(blockers)}.'
+            })
+        self.review_status = ReviewStatus.REVIEWED
+        self.save(update_fields=('review_status', 'updated_at'))
+
     def save(self, *args, **kwargs):
         update_fields = kwargs.get('update_fields')
-        category_may_change = update_fields is None or 'subcategory' in update_fields
-        if category_may_change:
-            previous_subcategory_id = None
-            if self.pk and not self._state.adding:
-                previous_subcategory_id = (
-                    type(self).objects.filter(pk=self.pk)
-                    .values_list('subcategory_id', flat=True)
-                    .first()
-                )
-            if self._state.adding or previous_subcategory_id != self.subcategory_id:
-                self.budget_bucket = self.subcategory.budget_bucket if self.subcategory_id else ''
-                if update_fields is not None:
-                    kwargs['update_fields'] = set(update_fields) | {'budget_bucket'}
+        changed_fields = set()
+        previous = None
+        if self.pk and not self._state.adding:
+            previous = type(self).objects.filter(pk=self.pk).values(
+                'classification',
+                'subcategory_id',
+                'review_status',
+            ).first()
+
+        classification_changed = previous is not None and previous['classification'] != self.classification
+        subcategory_changed = previous is None or previous['subcategory_id'] != self.subcategory_id
+        if self.subcategory_id:
+            eligible_buckets = self.eligible_buckets(self.classification)
+            if self.subcategory.budget_bucket not in eligible_buckets:
+                if classification_changed:
+                    self.subcategory = None
+                    self.budget_bucket = ''
+                    changed_fields.update(('subcategory', 'budget_bucket'))
+                else:
+                    raise ValidationError({
+                        'subcategory': 'The selected subcategory is not valid for this classification.'
+                    })
+            elif subcategory_changed:
+                if not self.subcategory.is_active:
+                    raise ValidationError({'subcategory': 'New assignments must use an active subcategory.'})
+                self.budget_bucket = self.subcategory.budget_bucket
+                changed_fields.add('budget_bucket')
+            elif self.budget_bucket not in eligible_buckets:
+                raise ValidationError({
+                    'budget_bucket': 'A valid historical bucket snapshot is required for this subcategory.'
+                })
+        elif self.budget_bucket:
+            self.budget_bucket = ''
+            changed_fields.add('budget_bucket')
+
+        if self.duplicate_resolution == DuplicateResolution.CONFIRMED_DUPLICATE:
+            if not self.duplicate_of_id or not self.duplicate_candidates.filter(pk=self.duplicate_of_id).exists():
+                raise ValidationError({
+                    'duplicate_of': 'Select one of this transaction’s possible duplicate candidates.'
+                })
+        elif self.duplicate_of_id:
+            self.duplicate_of = None
+            changed_fields.add('duplicate_of')
+
+        if self.duplicate_resolution == DuplicateResolution.CONFIRMED_DUPLICATE:
+            self.review_status = ReviewStatus.REVIEWED
+        elif self.review_blockers():
+            self.review_status = ReviewStatus.PENDING
+        elif self.classification == TransactionClassification.TRANSFER and (
+            previous is None or previous['classification'] != self.classification
+        ):
+            self.review_status = ReviewStatus.PENDING
+        elif previous is None:
+            self.review_status = (
+                ReviewStatus.PENDING
+                if self.classification == TransactionClassification.TRANSFER
+                else ReviewStatus.NOT_REQUIRED
+            )
+        if previous is None or previous['review_status'] != self.review_status:
+            changed_fields.add('review_status')
+
+        if update_fields is not None and changed_fields:
+            kwargs['update_fields'] = set(update_fields) | changed_fields | {'updated_at'}
         super().save(*args, **kwargs)
 
     def __str__(self):

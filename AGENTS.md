@@ -466,6 +466,8 @@ Avoid Redux unless there is a demonstrated need.
 
 Keep API interaction centralized enough that request behavior is consistent.
 
+All frontend API mutations must use the shared CSRF-aware `apiFetch` in `frontend/src/api.ts`. Do not use raw `fetch()` for POST, PATCH, PUT, or DELETE requests.
+
 Desktop usage is the priority.
 
 Responsive behavior is desirable but mobile-first design is not required.

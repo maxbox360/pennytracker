@@ -1,26 +1,20 @@
 import { useEffect, useState } from 'react'
 import { apiFetch } from './api'
+import TransactionTable from './TransactionTable'
 import './App.css'
 
-type Transaction = {
-  id: number
-  account_name: string
-  subcategory_name: string | null
-  date: string
-  raw_description: string
-  merchant: string
-  amount: string
-  classification: 'UNKNOWN' | 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER' | 'EXCLUDED'
-  budget_bucket: '' | 'NEEDS' | 'WANTS' | 'SAVINGS'
-}
-
 type Account = { id: number; name: string; is_active: boolean }
+type Classification = 'UNKNOWN' | 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER' | 'EXCLUDED'
 type Preview = {
   account: { id: number; name: string }
   filename: string
   source_row_count: number
   valid_row_count: number
   invalid_row_count: number
+  new_row_count: number
+  already_represented_row_count: number
+  possible_duplicate_row_count: number
+  review_required_row_count: number
   valid_rows: {
     source_row: number
     date: string
@@ -28,33 +22,39 @@ type Preview = {
     raw_description: string
     amount: string
     source_type: string
-    classification: Transaction['classification']
+    classification: Classification
+    overlap_status: 'NEW' | 'ALREADY_REPRESENTED' | 'POSSIBLE_DUPLICATE'
+    overlap_reason: string
+    duplicate_candidates: {
+      id: number
+      date: string
+      raw_description: string
+      merchant: string
+      amount: string
+      source_type: string
+      account: string
+    }[]
   }[]
   invalid_rows: { source_row: number; errors: string[] }[]
   already_imported: boolean
   can_import: boolean
 }
-
 type ImportResult = {
   filename: string
   account: string
   source_row_count: number
   imported_row_count: number
+  already_represented_row_count: number
+  possible_duplicate_row_count: number
 }
 
-const classificationLabels: Record<Transaction['classification'], string> = {
+const classificationLabels: Record<Classification, string> = {
   UNKNOWN: 'Unknown',
   EXPENSE: 'Expense',
   INCOME: 'Income',
   REFUND: 'Refund',
   TRANSFER: 'Transfer',
   EXCLUDED: 'Excluded',
-}
-
-const bucketLabels: Record<Exclude<Transaction['budget_bucket'], ''>, string> = {
-  NEEDS: 'Needs',
-  WANTS: 'Wants',
-  SAVINGS: 'Savings',
 }
 
 function formatAmount(amount: string) {
@@ -65,10 +65,8 @@ function formatAmount(amount: string) {
 }
 
 function App() {
-  const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
   const [reload, setReload] = useState(0)
+  const [view, setView] = useState<'transactions' | 'review'>('transactions')
   const [showImport, setShowImport] = useState(false)
   const [accounts, setAccounts] = useState<Account[]>([])
   const [accountId, setAccountId] = useState('')
@@ -77,32 +75,6 @@ function App() {
   const [importResult, setImportResult] = useState<ImportResult | null>(null)
   const [importError, setImportError] = useState('')
   const [importing, setImporting] = useState(false)
-
-  useEffect(() => {
-    let active = true
-
-    async function loadTransactions() {
-      setLoading(true)
-      setError('')
-      try {
-        const response = await apiFetch('/api/transactions/')
-        if (!response.ok) throw new Error(`Request failed (${response.status})`)
-        const result: Transaction[] = await response.json()
-        if (active) setTransactions(result)
-      } catch (loadError) {
-        if (active) {
-          setError(loadError instanceof Error ? loadError.message : 'Unable to load transactions')
-        }
-      } finally {
-        if (active) setLoading(false)
-      }
-    }
-
-    void loadTransactions()
-    return () => {
-      active = false
-    }
-  }, [reload])
 
   useEffect(() => {
     if (!showImport) return
@@ -154,42 +126,54 @@ function App() {
           <span>PennyTracker</span>
         </a>
         <nav aria-label="Main navigation">
-          <a className="nav-item nav-item--active" href="#transactions" aria-current="page">
+          <button
+            className={`nav-item ${view === 'transactions' ? 'nav-item--active' : ''}`}
+            type="button"
+            aria-current={view === 'transactions' ? 'page' : undefined}
+            onClick={() => setView('transactions')}
+          >
             <span className="nav-icon" aria-hidden="true">▤</span>
             Transactions
-          </a>
+          </button>
+          <button
+            className={`nav-item ${view === 'review' ? 'nav-item--active' : ''}`}
+            type="button"
+            aria-current={view === 'review' ? 'page' : undefined}
+            onClick={() => setView('review')}
+          >
+            <span className="nav-icon" aria-hidden="true">✓</span>
+            Review
+          </button>
         </nav>
         <p className="local-note">Your finances stay on this device.</p>
       </aside>
 
-      <main className="main-content" id="transactions">
+      <main className="main-content" id={view}>
         <header className="page-header">
           <div>
-            <p className="eyebrow">LEDGER</p>
-            <h1>Transactions</h1>
-            <p className="page-description">A clear view of activity across your accounts.</p>
+            <p className="eyebrow">{view === 'review' ? 'REVIEW QUEUE' : 'LEDGER'}</p>
+            <h1>{view === 'review' ? 'Review' : 'Transactions'}</h1>
+            <p className="page-description">
+              {view === 'review'
+                ? 'Resolve unknown classifications, uncategorized activity, and possible duplicates.'
+                : 'A clear view of activity across your accounts.'}
+            </p>
           </div>
-          <button
-            className="refresh-button"
-            type="button"
-            onClick={() => setReload((current) => current + 1)}
-            disabled={loading}
-          >
-            Refresh
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => {
-              setShowImport((shown) => !shown)
-              setImportError('')
-            }}
-          >
-            {showImport ? 'Close import' : 'Import CSV'}
-          </button>
+          {view === 'transactions' && (
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => {
+                setShowImport((shown) => !shown)
+                setImportError('')
+              }}
+            >
+              {showImport ? 'Close import' : 'Import CSV'}
+            </button>
+          )}
         </header>
 
-        {showImport && (
+        {showImport && view === 'transactions' && (
           <section className="import-card" aria-labelledby="import-heading">
             <div className="import-heading">
               <div>
@@ -236,14 +220,19 @@ function App() {
             {importError && <p className="message message--error" role="alert">{importError}</p>}
             {importResult && (
               <p className="import-success" role="status">
-                Imported {importResult.imported_row_count} of {importResult.source_row_count} rows
-                from {importResult.filename} into {importResult.account}.
+                Imported {importResult.imported_row_count} new or possible-duplicate rows; skipped
+                {' '}{importResult.already_represented_row_count} already represented rows from
+                {' '}{importResult.filename} into {importResult.account}.
               </p>
             )}
             {preview && (
               <div className="preview-content">
                 <p className="preview-summary">
-                  {preview.valid_row_count} valid · {preview.invalid_row_count} invalid · Account: {preview.account.name}
+                  {preview.source_row_count} source rows · {preview.new_row_count} new ·
+                  {' '}{preview.already_represented_row_count} already represented ·
+                  {' '}{preview.possible_duplicate_row_count} possible duplicates ·
+                  {' '}{preview.invalid_row_count} invalid ·
+                  {' '}{preview.review_required_row_count} need review · Account: {preview.account.name}
                 </p>
                 {preview.already_imported && (
                   <p className="preview-warning" role="alert">This exact file was already imported to this account.</p>
@@ -257,6 +246,7 @@ function App() {
                           <th scope="col">Description</th>
                           <th scope="col">Source type</th>
                           <th scope="col">Classification</th>
+                          <th scope="col">Import result</th>
                           <th scope="col" className="amount-cell">Amount</th>
                         </tr>
                       </thead>
@@ -271,6 +261,22 @@ function App() {
                                 {classificationLabels[row.classification]}
                               </span>
                             </td>
+                            <td>
+                              <span className={`overlap-status overlap-status--${row.overlap_status.toLowerCase()}`}>
+                                {row.overlap_status === 'ALREADY_REPRESENTED'
+                                  ? 'Already represented'
+                                  : row.overlap_status === 'POSSIBLE_DUPLICATE'
+                                    ? 'Possible duplicate'
+                                    : 'New'}
+                              </span>
+                              {row.duplicate_candidates.length > 0 && (
+                                <small className="candidate-summary">
+                                  {row.overlap_reason} Compared with {row.duplicate_candidates.map((candidate) =>
+                                    `#${candidate.id} ${candidate.account} · ${candidate.date} · ${candidate.raw_description} · ${formatAmount(candidate.amount)} · ${candidate.source_type}`,
+                                  ).join(' | ')}
+                                </small>
+                              )}
+                            </td>
                             <td className={`amount-cell ${row.amount.startsWith('-') ? 'amount-negative' : 'amount-positive'}`}>
                               {formatAmount(row.amount)}
                             </td>
@@ -280,9 +286,9 @@ function App() {
                     </table>
                   </div>
                 )}
-                {preview.valid_rows.some((row) => row.classification === 'UNKNOWN') && (
+                {preview.review_required_row_count > 0 && (
                   <p className="preview-warning">
-                    Unknown classifications are valid and will be imported without guessing.
+                    Rows needing attention will be imported into Review; possible duplicates remain excluded from future totals until resolved.
                   </p>
                 )}
                 {preview.invalid_rows.length > 0 && (
@@ -307,85 +313,7 @@ function App() {
           </section>
         )}
 
-        <section className="ledger-card" aria-labelledby="ledger-heading">
-          <div className="ledger-heading">
-            <div>
-              <h2 id="ledger-heading">All transactions</h2>
-              <p>{loading ? 'Loading your ledger…' : `${transactions.length} transactions`}</p>
-            </div>
-          </div>
-
-          {error ? (
-            <div className="message message--error" role="alert">
-              <span>{error}. Check that the backend is running.</span>
-              <button type="button" onClick={() => setReload((current) => current + 1)}>
-                Try again
-              </button>
-            </div>
-          ) : loading ? (
-            <p className="message" role="status">Loading transactions…</p>
-          ) : transactions.length === 0 ? (
-            <div className="empty-state">
-              <span className="empty-icon" aria-hidden="true">↗</span>
-              <h3>Your ledger is ready</h3>
-              <p>Add an account and transactions in Django admin to see them here.</p>
-              <a href="http://127.0.0.1:8000/admin/" target="_blank" rel="noreferrer">
-                Open Django admin
-              </a>
-            </div>
-          ) : (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Date</th>
-                    <th scope="col">Description</th>
-                    <th scope="col">Account</th>
-                    <th scope="col">Classification</th>
-                    <th scope="col">Category</th>
-                    <th scope="col" className="amount-cell">Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {transactions.map((transaction) => (
-                    <tr key={transaction.id}>
-                      <td className="date-cell">{transaction.date}</td>
-                      <td>
-                        <div className="description">
-                          <span>{transaction.merchant || transaction.raw_description}</span>
-                          {transaction.merchant && (
-                            <small>{transaction.raw_description}</small>
-                          )}
-                        </div>
-                      </td>
-                      <td>{transaction.account_name}</td>
-                      <td>
-                        <span className={`classification classification--${transaction.classification.toLowerCase()}`}>
-                          {classificationLabels[transaction.classification]}
-                        </span>
-                      </td>
-                      <td>
-                        {transaction.subcategory_name ? (
-                          <span>
-                            {transaction.subcategory_name}
-                            {transaction.budget_bucket && (
-                              <small className="bucket-label">
-                                {bucketLabels[transaction.budget_bucket]}
-                              </small>
-                            )}
-                          </span>
-                        ) : <span className="muted">Uncategorized</span>}
-                      </td>
-                      <td className={`amount-cell ${transaction.amount.startsWith('-') ? 'amount-negative' : 'amount-positive'}`}>
-                        {formatAmount(transaction.amount)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
+        <TransactionTable mode={view} reload={reload} />
       </main>
     </div>
   )

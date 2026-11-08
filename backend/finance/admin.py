@@ -12,6 +12,8 @@ class ImportBatchAdmin(admin.ModelAdmin):
         'latest_transaction_date',
         'source_row_count',
         'imported_row_count',
+        'already_represented_row_count',
+        'possible_duplicate_row_count',
     )
     list_filter = ('account', 'format_identifier')
     search_fields = ('original_filename', 'file_sha256')
@@ -22,6 +24,8 @@ class ImportBatchAdmin(admin.ModelAdmin):
         'format_identifier',
         'source_row_count',
         'imported_row_count',
+        'already_represented_row_count',
+        'possible_duplicate_row_count',
         'earliest_transaction_date',
         'latest_transaction_date',
         'imported_at',
@@ -47,7 +51,28 @@ class SubcategoryAdmin(admin.ModelAdmin):
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
-    list_display = ('date', 'raw_description', 'account', 'amount', 'classification', 'budget_bucket')
-    list_filter = ('classification', 'budget_bucket', 'account')
+    list_display = (
+        'date',
+        'raw_description',
+        'account',
+        'amount',
+        'classification',
+        'review_status',
+        'duplicate_resolution',
+        'budget_bucket',
+    )
+    list_filter = ('classification', 'review_status', 'duplicate_resolution', 'budget_bucket', 'account')
     search_fields = ('raw_description', 'merchant', 'notes')
-    readonly_fields = ('budget_bucket', 'created_at', 'updated_at')
+    readonly_fields = (
+        'account',
+        'date',
+        'posted_date',
+        'raw_description',
+        'amount',
+        'source_type',
+        'import_batch',
+        'source_row',
+        'budget_bucket',
+        'created_at',
+        'updated_at',
+    )

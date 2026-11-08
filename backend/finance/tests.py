@@ -12,11 +12,21 @@ from .csv_imports import (
     MAX_UPLOAD_BYTES,
     DuplicateImportError,
     ImportFileError,
+    ParsedImport,
     commit_import,
     file_hash,
+    overlap_results,
     parse_csv,
 )
-from .models import Account, BudgetBucket, ImportBatch, Subcategory, Transaction
+from .models import (
+    Account,
+    BudgetBucket,
+    DuplicateResolution,
+    ImportBatch,
+    ReviewStatus,
+    Subcategory,
+    Transaction,
+)
 
 
 class TransactionModelTests(TestCase):
@@ -45,6 +55,7 @@ class TransactionModelTests(TestCase):
             date=date(2026, 1, 15),
             raw_description='Market',
             amount=Decimal('-42.50'),
+            classification=Transaction.Classification.EXPENSE,
         )
         self.assertEqual(transaction.budget_bucket, BudgetBucket.NEEDS)
 
@@ -56,6 +67,57 @@ class TransactionModelTests(TestCase):
         transaction.subcategory = wants
         transaction.save()
         self.assertEqual(transaction.budget_bucket, BudgetBucket.WANTS)
+
+    def test_classification_change_clears_invalid_subcategory_and_bucket(self):
+        wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
+        transaction = Transaction.objects.create(
+            account=self.account,
+            subcategory=wants,
+            date=date(2026, 1, 15),
+            raw_description='Restaurant',
+            amount=Decimal('-20.00'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+
+        transaction.classification = Transaction.Classification.INCOME
+        transaction.save(update_fields=('classification',))
+        transaction.refresh_from_db()
+
+        self.assertIsNone(transaction.subcategory)
+        self.assertEqual(transaction.budget_bucket, '')
+        self.assertEqual(transaction.review_status, ReviewStatus.NOT_REQUIRED)
+
+    def test_unresolved_edits_return_reviewed_transactions_to_pending(self):
+        wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
+        transaction = Transaction.objects.create(
+            account=self.account,
+            subcategory=wants,
+            date=date(2026, 1, 15),
+            raw_description='Restaurant',
+            amount=Decimal('-20.00'),
+            classification=Transaction.Classification.EXPENSE,
+            review_status=ReviewStatus.REVIEWED,
+        )
+        transaction.classification = Transaction.Classification.UNKNOWN
+        transaction.save(update_fields=('classification',))
+        transaction.refresh_from_db()
+
+        self.assertIsNone(transaction.subcategory)
+        self.assertEqual(transaction.budget_bucket, '')
+        self.assertEqual(transaction.review_status, ReviewStatus.PENDING)
+
+    def test_transfer_savings_category_is_allowed_but_other_transfer_category_is_not(self):
+        savings = Subcategory.objects.create(name='Emergency Fund', budget_bucket=BudgetBucket.SAVINGS)
+        transaction = Transaction.objects.create(
+            account=self.account,
+            subcategory=savings,
+            date=date(2026, 1, 15),
+            raw_description='Savings transfer',
+            amount=Decimal('-100.00'),
+            classification=Transaction.Classification.TRANSFER,
+        )
+        self.assertEqual(transaction.budget_bucket, BudgetBucket.SAVINGS)
+        self.assertEqual(transaction.review_status, ReviewStatus.PENDING)
 
     def test_amount_uses_decimal_precision_and_raw_description_is_preserved(self):
         transaction = Transaction.objects.create(
@@ -138,6 +200,228 @@ class LedgerApiTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('budget_bucket', response.data)
 
+    def test_income_and_transfer_category_eligibility(self):
+        response = self.client.post(
+            '/api/transactions/',
+            {
+                'account': self.account.id,
+                'subcategory': self.needs.id,
+                'date': '2026-01-15',
+                'raw_description': 'Income',
+                'amount': '100.00',
+                'classification': 'INCOME',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('subcategory', response.data)
+
+        response = self.client.post(
+            '/api/transactions/',
+            {
+                'account': self.account.id,
+                'subcategory': self.needs.id,
+                'date': '2026-01-15',
+                'raw_description': 'Transfer',
+                'amount': '-100.00',
+                'classification': 'TRANSFER',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_classification_edit_clears_ineligible_subcategory_and_bucket_atomically(self):
+        transaction = Transaction.objects.create(
+            account=self.account,
+            subcategory=self.needs,
+            date=date(2026, 1, 15),
+            raw_description='Groceries',
+            amount=Decimal('-20.00'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+        response = self.client.patch(
+            f'/api/transactions/{transaction.id}/',
+            {'classification': 'INCOME'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data['subcategory'])
+        self.assertEqual(response.data['budget_bucket'], '')
+
+    def test_refund_requires_needs_or_wants_subcategory_to_be_reviewed(self):
+        transaction = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Refund',
+            amount=Decimal('10.00'),
+            classification=Transaction.Classification.REFUND,
+        )
+        response = self.client.post(f'/api/transactions/{transaction.id}/mark-reviewed/')
+        self.assertEqual(response.status_code, 400)
+
+        response = self.client.patch(
+            f'/api/transactions/{transaction.id}/',
+            {'subcategory': self.needs.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['budget_bucket'], BudgetBucket.NEEDS)
+        self.assertEqual(response.data['review_status'], ReviewStatus.PENDING)
+
+        response = self.client.post(f'/api/transactions/{transaction.id}/mark-reviewed/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['review_status'], ReviewStatus.REVIEWED)
+
+    def test_transfer_can_be_reviewed_without_category_and_savings_assignment_is_snapshotted(self):
+        savings = Subcategory.objects.create(name='Emergency Fund', budget_bucket=BudgetBucket.SAVINGS)
+        transaction = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Savings transfer',
+            amount=Decimal('-100.00'),
+            classification=Transaction.Classification.TRANSFER,
+        )
+        response = self.client.patch(
+            f'/api/transactions/{transaction.id}/',
+            {'subcategory': savings.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['budget_bucket'], BudgetBucket.SAVINGS)
+        response = self.client.post(f'/api/transactions/{transaction.id}/mark-reviewed/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['review_status'], ReviewStatus.REVIEWED)
+
+    def test_classifying_as_transfer_returns_not_required_transaction_to_review(self):
+        transaction = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Unclear bank entry',
+            amount=Decimal('-100.00'),
+            classification=Transaction.Classification.INCOME,
+        )
+        response = self.client.patch(
+            f'/api/transactions/{transaction.id}/',
+            {'classification': 'TRANSFER'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['review_status'], ReviewStatus.PENDING)
+
+    def test_individual_edit_preserves_raw_description_and_updates_merchant_and_notes(self):
+        transaction = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='SQ *COFFEE 123',
+            amount=Decimal('-4.00'),
+            classification=Transaction.Classification.UNKNOWN,
+        )
+        response = self.client.patch(
+            f'/api/transactions/{transaction.id}/',
+            {'merchant': 'Coffee Shop', 'notes': 'Work meeting'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['raw_description'], 'SQ *COFFEE 123')
+        self.assertEqual(response.data['merchant'], 'Coffee Shop')
+        self.assertEqual(response.data['notes'], 'Work meeting')
+
+    def test_bulk_subcategory_validation_is_atomic(self):
+        income = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Paycheck',
+            amount=Decimal('100.00'),
+            classification=Transaction.Classification.INCOME,
+        )
+        expense = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 16),
+            raw_description='Grocery store',
+            amount=Decimal('-10.00'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+
+        response = self.client.post(
+            '/api/transactions/bulk/',
+            {
+                'operation': 'subcategory',
+                'transaction_ids': [income.id, expense.id],
+                'subcategory': self.needs.id,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        income.refresh_from_db()
+        expense.refresh_from_db()
+        self.assertIsNone(income.subcategory)
+        self.assertIsNone(expense.subcategory)
+
+    def test_bulk_classification_clears_stale_categories_and_review_action_is_atomic(self):
+        expense = Transaction.objects.create(
+            account=self.account,
+            subcategory=self.needs,
+            date=date(2026, 1, 15),
+            raw_description='Grocery store',
+            amount=Decimal('-10.00'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+        unknown = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 16),
+            raw_description='Unknown transaction',
+            amount=Decimal('-4.00'),
+        )
+        response = self.client.post(
+            '/api/transactions/bulk/',
+            {
+                'operation': 'mark_reviewed',
+                'transaction_ids': [expense.id, unknown.id],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        expense.refresh_from_db()
+        self.assertEqual(expense.review_status, ReviewStatus.NOT_REQUIRED)
+
+        response = self.client.post(
+            '/api/transactions/bulk/',
+            {
+                'operation': 'classification',
+                'transaction_ids': [expense.id],
+                'classification': 'INCOME',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        expense.refresh_from_db()
+        self.assertIsNone(expense.subcategory)
+        self.assertEqual(expense.budget_bucket, '')
+
+    def test_transaction_list_filters_review_state_account_and_reason(self):
+        unknown = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Unknown transaction',
+            amount=Decimal('-4.00'),
+        )
+        response = self.client.get('/api/transactions/?review_status=PENDING&review_reason=UNKNOWN')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in response.data], [unknown.id])
+        response = self.client.get('/api/transactions/?start_date=bad-date')
+        self.assertEqual(response.status_code, 400)
+
+    def test_transactions_are_retained_instead_of_deleted(self):
+        transaction = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Auditable transaction',
+            amount=Decimal('-4.00'),
+        )
+        response = self.client.delete(f'/api/transactions/{transaction.id}/')
+        self.assertEqual(response.status_code, 405)
+        self.assertTrue(Transaction.objects.filter(pk=transaction.pk).exists())
+
 
 FIXTURE_PATH = Path(__file__).parent / 'tests' / 'fixtures' / 'sofi_checking.csv'
 SYNTHETIC_CSV = FIXTURE_PATH.read_bytes()
@@ -195,6 +479,83 @@ class CsvImportParserTests(TestCase):
         self.assertNotEqual(file_hash(SYNTHETIC_CSV), file_hash(SYNTHETIC_CSV + b'\n'))
 
 
+class OverlapImportTests(TestCase):
+    def setUp(self):
+        self.account = Account.objects.create(name='Checking')
+
+    def row(self, source_row=1, description='MERCHANT X', amount='-10.00', source_type='DEBIT_CARD'):
+        return {
+            'source_row': source_row,
+            'date': date(2026, 10, 10),
+            'posted_date': None,
+            'raw_description': description,
+            'amount': Decimal(amount),
+            'source_type': source_type,
+            'classification': Transaction.Classification.EXPENSE,
+        }
+
+    def parsed(self, rows):
+        return ParsedImport(rows, [], len(rows), 'synthetic-v1')
+
+    def test_fingerprint_multiplicity_matches_existing_occurrences_and_flags_excess(self):
+        repeated_rows = [self.row(1), self.row(2)]
+        first_batch = commit_import(self.account, 'two.csv', b'two occurrences', self.parsed(repeated_rows))
+        incoming = [self.row(1), self.row(2), self.row(3)]
+        outcomes = overlap_results(self.account, incoming)
+
+        self.assertEqual(
+            [row['overlap_status'] for row in outcomes],
+            ['ALREADY_REPRESENTED', 'ALREADY_REPRESENTED', 'POSSIBLE_DUPLICATE'],
+        )
+        second_batch = commit_import(self.account, 'three.csv', b'three occurrences', self.parsed(incoming))
+        self.assertEqual(first_batch.imported_row_count, 2)
+        self.assertEqual(second_batch.source_row_count, 3)
+        self.assertEqual(second_batch.imported_row_count, 1)
+        self.assertEqual(second_batch.already_represented_row_count, 2)
+        self.assertEqual(second_batch.possible_duplicate_row_count, 1)
+        self.assertEqual(Transaction.objects.count(), 3)
+        possible = Transaction.objects.get(import_batch=second_batch)
+        self.assertEqual(possible.duplicate_resolution, DuplicateResolution.UNRESOLVED)
+        self.assertEqual(possible.duplicate_candidates.count(), 2)
+
+    def test_possible_candidates_use_same_date_amount_and_matching_description_or_type(self):
+        first = self.row(description='Merchant Alpha', source_type='DEBIT_CARD')
+        commit_import(self.account, 'first.csv', b'first version', self.parsed([first]))
+        similar = self.row(description='Merchant Beta', source_type='DEBIT_CARD')
+        outcome = overlap_results(self.account, [similar])[0]
+
+        self.assertEqual(outcome['overlap_status'], 'POSSIBLE_DUPLICATE')
+        self.assertEqual([candidate.raw_description for candidate in outcome['duplicate_candidates']], ['Merchant Alpha'])
+
+    def test_matching_is_account_scoped_and_identical_in_file_rows_are_not_collapsed(self):
+        rows = [self.row(1), self.row(2)]
+        other_account = Account.objects.create(name='Other Checking')
+        commit_import(self.account, 'first.csv', b'first account', self.parsed([rows[0]]))
+
+        self.assertEqual(
+            [row['overlap_status'] for row in overlap_results(other_account, rows)],
+            ['NEW', 'NEW'],
+        )
+        results = overlap_results(self.account, rows)
+        self.assertEqual(
+            [row['overlap_status'] for row in results],
+            ['ALREADY_REPRESENTED', 'POSSIBLE_DUPLICATE'],
+        )
+
+    def test_description_fingerprint_ignores_case_and_repeated_whitespace(self):
+        commit_import(
+            self.account,
+            'first.csv',
+            b'first version',
+            self.parsed([self.row(description='Merchant   X')]),
+        )
+        incoming = self.row(description='  MERCHANT X  ')
+        self.assertEqual(
+            overlap_results(self.account, [incoming])[0]['overlap_status'],
+            'ALREADY_REPRESENTED',
+        )
+
+
 class CsvImportApiTests(APITestCase):
     def setUp(self):
         self.account = Account.objects.create(name='Synthetic Checking')
@@ -211,6 +572,8 @@ class CsvImportApiTests(APITestCase):
         self.assertEqual(preview.status_code, 200)
         self.assertEqual(preview.data['valid_row_count'], 6)
         self.assertTrue(preview.data['can_import'])
+        self.assertEqual(preview.data['new_row_count'], 6)
+        self.assertEqual(preview.data['review_required_row_count'], 5)
         self.assertEqual(ImportBatch.objects.count(), 0)
         self.assertEqual(Transaction.objects.count(), 0)
 
@@ -227,10 +590,147 @@ class CsvImportApiTests(APITestCase):
         self.assertEqual(batch.file_sha256, file_hash(SYNTHETIC_CSV))
         self.assertEqual(batch.source_row_count, 6)
         self.assertEqual(batch.imported_row_count, 6)
+        self.assertEqual(batch.already_represented_row_count, 0)
+        self.assertEqual(batch.possible_duplicate_row_count, 0)
         self.assertEqual([transaction.source_row for transaction in transactions], [1, 2, 3, 4, 5, 6])
         self.assertEqual(transactions[0].source_type, 'DEBIT_CARD')
         self.assertEqual(transactions[2].classification, 'UNKNOWN')
         self.assertIsNone(transactions[0].posted_date)
+
+    def test_preview_shows_overlap_candidates_without_writing(self):
+        existing_content = (
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-02-01,Same Coffee,DEBIT_CARD,-4.00,Posted\n'
+        )
+        commit_import(
+            self.account,
+            'first.csv',
+            existing_content,
+            parse_csv(existing_content),
+        )
+        overlap_content = (
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-02-01,Same Coffee,DEBIT_CARD,-4.00,Posted\n'
+            b'2026-02-01,Changed Coffee,DEBIT_CARD,-4.00,Posted\n'
+            b'2026-02-02,New transaction,ROUNDUP,-0.75,Posted\n'
+        )
+        preview = self.client.post(
+            '/api/imports/preview/',
+            {'account': self.account.id, 'file': self.upload('overlap.csv', overlap_content)},
+            format='multipart',
+        )
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.data['new_row_count'], 1)
+        self.assertEqual(preview.data['already_represented_row_count'], 1)
+        self.assertEqual(preview.data['possible_duplicate_row_count'], 1)
+        possible = next(row for row in preview.data['valid_rows'] if row['overlap_status'] == 'POSSIBLE_DUPLICATE')
+        self.assertEqual(possible['duplicate_candidates'][0]['raw_description'], 'Same Coffee')
+        self.assertEqual(ImportBatch.objects.count(), 1)
+        self.assertEqual(Transaction.objects.count(), 1)
+
+    def test_confirm_recomputes_overlap_and_records_only_nonrepresented_rows(self):
+        content = (
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-02-01,One transaction,DEBIT_CARD,-4.00,Posted\n'
+        )
+        parsed = parse_csv(content)
+        Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 2, 1),
+            raw_description='One transaction',
+            amount=Decimal('-4.00'),
+            source_type='DEBIT_CARD',
+            classification=Transaction.Classification.EXPENSE,
+        )
+        batch = commit_import(self.account, 'same-rows.csv', b'not-the-same-file', parsed)
+
+        self.assertEqual(batch.imported_row_count, 0)
+        self.assertEqual(batch.already_represented_row_count, 1)
+        self.assertEqual(Transaction.objects.count(), 1)
+
+    def test_source_fields_cannot_be_changed_through_transaction_api(self):
+        batch = commit_import(self.account, 'source.csv', SYNTHETIC_CSV, parse_csv(SYNTHETIC_CSV))
+        record = Transaction.objects.filter(import_batch=batch).first()
+        attempted_updates = (
+            {'account': Account.objects.create(name='Other').id},
+            {'date': '2026-03-01'},
+            {'posted_date': '2026-03-01'},
+            {'raw_description': 'overwritten'},
+            {'amount': '-999.00'},
+            {'source_type': 'MANUAL'},
+            {'import_batch': None},
+            {'source_row': 999},
+        )
+        for update in attempted_updates:
+            response = self.client.patch(
+                f'/api/transactions/{record.id}/',
+                update,
+                format='json',
+            )
+            self.assertEqual(response.status_code, 400, update)
+            self.assertTrue(
+                any('cannot be edited' in str(value) for value in response.data.values()),
+                response.data,
+            )
+
+    def test_possible_duplicate_context_and_resolution_remain_separate_from_classification(self):
+        first_content = (
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-02-01,Merchant Alpha,DEBIT_CARD,-4.00,Posted\n'
+        )
+        commit_import(self.account, 'first.csv', first_content, parse_csv(first_content))
+        second_content = (
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-02-01,Merchant Beta,DEBIT_CARD,-4.00,Posted\n'
+        )
+        batch = commit_import(
+            self.account,
+            'second.csv',
+            second_content,
+            parse_csv(second_content),
+        )
+        possible = Transaction.objects.get(import_batch=batch)
+        response = self.client.get(f'/api/transactions/{possible.id}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['duplicate_candidates'][0]['raw_description'], 'Merchant Alpha')
+
+        candidate_id = possible.duplicate_candidates.get().id
+        response = self.client.post(
+            f'/api/transactions/{possible.id}/resolve-duplicate/',
+            {'resolution': 'CONFIRMED_DUPLICATE', 'duplicate_of': candidate_id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        possible.refresh_from_db()
+        self.assertEqual(possible.duplicate_resolution, DuplicateResolution.CONFIRMED_DUPLICATE)
+        self.assertEqual(possible.duplicate_of_id, candidate_id)
+        self.assertEqual(possible.classification, Transaction.Classification.EXPENSE)
+        self.assertEqual(possible.review_status, ReviewStatus.REVIEWED)
+
+    def test_marking_possible_duplicate_distinct_keeps_normal_review_requirements(self):
+        first_content = (
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-02-01,Merchant Alpha,DEBIT_CARD,-4.00,Posted\n'
+        )
+        commit_import(self.account, 'first.csv', first_content, parse_csv(first_content))
+        second_content = (
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-02-01,Merchant Beta,DEBIT_CARD,-4.00,Posted\n'
+        )
+        batch = commit_import(self.account, 'second.csv', second_content, parse_csv(second_content))
+        possible = Transaction.objects.get(import_batch=batch)
+
+        response = self.client.post(
+            f'/api/transactions/{possible.id}/resolve-duplicate/',
+            {'resolution': 'DISTINCT'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        possible.refresh_from_db()
+        self.assertEqual(possible.duplicate_resolution, DuplicateResolution.DISTINCT)
+        self.assertEqual(possible.review_status, ReviewStatus.PENDING)
+        self.assertIsNone(possible.duplicate_of)
+        self.assertEqual(possible.classification, Transaction.Classification.EXPENSE)
 
     def test_preview_accepts_local_vite_origin_without_csrf_exemption_changes(self):
         response = self.client.post(
