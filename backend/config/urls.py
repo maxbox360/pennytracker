@@ -25,6 +25,7 @@ from finance.views import (
     confirm_import,
     preview_import,
 )
+from finance.csrf import csrf_token
 
 router = DefaultRouter()
 router.register('accounts', AccountViewSet)
@@ -34,6 +35,7 @@ router.register('transactions', TransactionViewSet)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/csrf/', csrf_token, name='csrf-token'),
     path('api/imports/preview/', preview_import, name='import-preview'),
     path('api/imports/', confirm_import, name='import-confirm'),
     path('api/', include(router.urls)),

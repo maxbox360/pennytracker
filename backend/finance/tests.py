@@ -3,7 +3,8 @@ from unittest.mock import patch
 from datetime import date
 from decimal import Decimal
 
-from django.test import TestCase
+from django.test import Client, TestCase
+from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APITestCase
 
@@ -231,6 +232,22 @@ class CsvImportApiTests(APITestCase):
         self.assertEqual(transactions[2].classification, 'UNKNOWN')
         self.assertIsNone(transactions[0].posted_date)
 
+    def test_preview_accepts_local_vite_origin_without_csrf_exemption_changes(self):
+        response = self.client.post(
+            '/api/imports/preview/',
+            {'account': self.account.id, 'file': self.upload('synthetic.csv')},
+            format='multipart',
+            HTTP_ORIGIN='http://localhost:5173',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['valid_row_count'], 6)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_local_vite_origins_are_trusted(self):
+        self.assertIn('http://localhost:5173', settings.CSRF_TRUSTED_ORIGINS)
+        self.assertIn('http://127.0.0.1:5173', settings.CSRF_TRUSTED_ORIGINS)
+
     def test_import_batch_tracks_arbitrary_transaction_date_range_not_filename(self):
         content = (
             b'Date,Description,Type,Amount,Current balance,Status\n'
@@ -341,3 +358,58 @@ class CsvImportApiTests(APITestCase):
         )
         self.assertEqual(too_large.status_code, 400)
         self.assertIn('20 MiB', too_large.data['detail'])
+
+
+class CsrfFlowTests(TestCase):
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+        self.account = Account.objects.create(name='Synthetic Checking')
+
+    def upload(self):
+        return SimpleUploadedFile('synthetic.csv', SYNTHETIC_CSV, content_type='text/csv')
+
+    def test_csrf_endpoint_sets_cookie_and_token_allows_preview(self):
+        token_response = self.client.get('/api/csrf/')
+        self.assertEqual(token_response.status_code, 200)
+        token = token_response.json()['csrfToken']
+        self.assertIn('csrftoken', self.client.cookies)
+
+        response = self.client.post(
+            '/api/imports/preview/',
+            {'account': self.account.id, 'file': self.upload()},
+            HTTP_ORIGIN='http://localhost:5173',
+            HTTP_X_CSRFTOKEN=token,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['valid_row_count'], 6)
+        self.assertEqual(ImportBatch.objects.count(), 0)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_missing_or_untrusted_csrf_requests_are_rejected(self):
+        missing_token = self.client.post(
+            '/api/imports/preview/',
+            {'account': self.account.id, 'file': self.upload()},
+            HTTP_ORIGIN='http://localhost:5173',
+        )
+        self.assertEqual(missing_token.status_code, 403)
+
+        token_response = self.client.get('/api/csrf/')
+        token = token_response.json()['csrfToken']
+        invalid_token = self.client.post(
+            '/api/imports/preview/',
+            {'account': self.account.id, 'file': self.upload()},
+            HTTP_ORIGIN='http://localhost:5173',
+            HTTP_X_CSRFTOKEN='invalid-token',
+        )
+        self.assertEqual(invalid_token.status_code, 403)
+
+        untrusted_origin = self.client.post(
+            '/api/imports/preview/',
+            {'account': self.account.id, 'file': self.upload()},
+            HTTP_ORIGIN='http://evil.example',
+            HTTP_X_CSRFTOKEN=token,
+        )
+        self.assertEqual(untrusted_origin.status_code, 403)
+        self.assertEqual(ImportBatch.objects.count(), 0)
+        self.assertEqual(Transaction.objects.count(), 0)

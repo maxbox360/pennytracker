@@ -27,6 +27,14 @@ SECRET_KEY = 'pennytracker-local-development-only'
 DEBUG = True
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'backend']
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        'DJANGO_CSRF_TRUSTED_ORIGINS',
+        'http://localhost:5173,http://127.0.0.1:5173',
+    ).split(',')
+    if origin.strip()
+]
 
 
 # Application definition
@@ -130,6 +138,10 @@ MAILERS = {
 }
 
 REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'finance.authentication.CsrfSessionAuthentication',
+        'rest_framework.authentication.BasicAuthentication',
+    ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
     ],

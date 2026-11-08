@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { apiFetch } from './api'
 import './App.css'
 
 type Transaction = {
@@ -84,7 +85,7 @@ function App() {
       setLoading(true)
       setError('')
       try {
-        const response = await fetch('/api/transactions/')
+        const response = await apiFetch('/api/transactions/')
         if (!response.ok) throw new Error(`Request failed (${response.status})`)
         const result: Transaction[] = await response.json()
         if (active) setTransactions(result)
@@ -105,7 +106,7 @@ function App() {
 
   useEffect(() => {
     if (!showImport) return
-    fetch('/api/accounts/')
+    apiFetch('/api/accounts/')
       .then(async (response) => {
         if (!response.ok) throw new Error(`Request failed (${response.status})`)
         const result: Account[] = await response.json()
@@ -125,7 +126,7 @@ function App() {
     formData.append('account', accountId)
     formData.append('file', file)
     try {
-      const response = await fetch(`/api/imports/${action === 'preview' ? 'preview/' : ''}`, {
+      const response = await apiFetch(`/api/imports/${action === 'preview' ? 'preview/' : ''}`, {
         method: 'POST',
         body: formData,
       })
