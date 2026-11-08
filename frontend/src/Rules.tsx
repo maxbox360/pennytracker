@@ -244,6 +244,7 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
               value={draft.match_value}
               maxLength={200}
               required
+              placeholder="COFFEE SHOP"
               onChange={(event) => setDraft({ ...draft, match_value: event.target.value })}
             />
           </label>
@@ -271,6 +272,10 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
           <p className="rule-preview">
             When an EXPENSE raw description contains “{normalizedRuleValue(draft.match_value) || '…'}”,
             assign {categories.find((category) => category.id === Number(draft.subcategory))?.name || 'the selected subcategory'}.
+          </p>
+          <p className="rule-example">
+            Example: EXPENSE + description contains “COFFEE SHOP” → Dining. Use a useful text fragment; matching is
+            case-insensitive, classification must already match, and rules assign a Subcategory without changing it.
           </p>
           <div className="editor-actions">
             <button className="primary-button" type="submit">Save rule</button>

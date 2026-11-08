@@ -1,11 +1,15 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from .models import (
     Account,
     BudgetBucket,
+    BudgetTargetSettings,
     CategorizationRule,
     ImportBatch,
     RuleMatchField,
     RuleMatchType,
+    SavingsEffect,
     Subcategory,
     Transaction,
     TransactionClassification,
@@ -45,6 +49,22 @@ class AccountSerializer(serializers.ModelSerializer):
             'is_savings_destination',
             'is_active',
         )
+
+
+class BudgetTargetSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BudgetTargetSettings
+        fields = ('needs_percent', 'wants_percent', 'savings_percent')
+
+    def validate(self, attrs):
+        errors = {}
+        for field in ('needs_percent', 'wants_percent', 'savings_percent'):
+            value = attrs.get(field, getattr(self.instance, field, None) if self.instance else None)
+            if value is not None and not Decimal('0') <= value <= Decimal('100'):
+                errors[field] = 'Enter a percentage from 0 to 100.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
 
 
 class SubcategorySerializer(serializers.ModelSerializer):
@@ -208,6 +228,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             'import_batch',
             'source_row',
             'classification',
+            'savings_effect',
             'budget_bucket',
             'review_status',
             'review_reasons',
@@ -302,4 +323,22 @@ class TransactionSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         'subcategory': 'New assignments must use an active subcategory.'
                     })
+        savings_effect = attrs.get(
+            'savings_effect',
+            self.instance.savings_effect if self.instance else SavingsEffect.NONE,
+        )
+        if savings_effect != SavingsEffect.NONE:
+            saved_bucket = (
+                self.instance.budget_bucket
+                if self.instance and not subcategory_was_supplied
+                else (subcategory.budget_bucket if subcategory else '')
+            )
+            if classification != TransactionClassification.TRANSFER:
+                raise serializers.ValidationError({
+                    'savings_effect': 'Savings effects can only be assigned to Transfers.'
+                })
+            if not subcategory or saved_bucket != BudgetBucket.SAVINGS:
+                raise serializers.ValidationError({
+                    'savings_effect': 'Choose a Savings subcategory before marking a contribution or withdrawal.'
+                })
         return attrs

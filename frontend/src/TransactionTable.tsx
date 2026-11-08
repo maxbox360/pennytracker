@@ -4,6 +4,7 @@ import { apiFetch } from './api'
 
 type Classification = 'UNKNOWN' | 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER' | 'EXCLUDED'
 type Bucket = 'NEEDS' | 'WANTS' | 'SAVINGS'
+type SavingsEffect = 'NONE' | 'CONTRIBUTION' | 'WITHDRAWAL'
 type Subcategory = { id: number; name: string; budget_bucket: Bucket; is_active: boolean }
 type Account = { id: number; name: string; is_active: boolean }
 type Candidate = {
@@ -32,6 +33,7 @@ type Transaction = {
   amount: string
   source_type: string
   classification: Classification
+  savings_effect: SavingsEffect
   budget_bucket: '' | Bucket
   review_status: 'PENDING' | 'REVIEWED' | 'NOT_REQUIRED'
   review_reasons: { code: string; label: string }[]
@@ -44,6 +46,7 @@ type Transaction = {
 type Props = { mode: 'transactions' | 'review'; reload: number }
 type Draft = {
   classification: Classification
+  savings_effect: SavingsEffect
   subcategory: string
   merchant: string
   notes: string
@@ -241,6 +244,7 @@ export default function TransactionTable({ mode, reload }: Props) {
     setEditingId(item.id)
     setDraft({
       classification: item.classification,
+      savings_effect: item.savings_effect,
       subcategory: item.subcategory ? String(item.subcategory) : '',
       merchant: item.merchant,
       notes: item.notes,
@@ -259,6 +263,7 @@ export default function TransactionTable({ mode, reload }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           classification: draft.classification,
+          savings_effect: draft.savings_effect,
           subcategory: draft.subcategory || null,
           merchant: draft.merchant,
           notes: draft.notes,
@@ -692,6 +697,9 @@ function FragmentRow(props: RowProps) {
           {item.categorized_by_rule && (
             <small className="rule-provenance">Automatically categorized · Rule #{item.categorized_by_rule}</small>
           )}
+          {item.savings_effect !== 'NONE' && (
+            <small className="review-reasons">Savings {item.savings_effect.toLowerCase()}</small>
+          )}
         </td>
         <td>
           {mode === 'review' && (
@@ -729,6 +737,7 @@ function FragmentRow(props: RowProps) {
                     props.onDraft({
                       ...draft,
                       classification,
+                      savings_effect: classification === 'TRANSFER' ? draft.savings_effect : 'NONE',
                       subcategory: nextSubcategory && acceptsBucket(classification, nextSubcategory.budget_bucket)
                         ? draft.subcategory
                         : '',
@@ -748,6 +757,9 @@ function FragmentRow(props: RowProps) {
                   onChange={(event) => props.onDraft({
                     ...draft,
                     subcategory: event.target.value,
+                    savings_effect: subcategories.find((category) => category.id === Number(event.target.value))?.budget_bucket === 'SAVINGS'
+                      ? draft.savings_effect
+                      : 'NONE',
                     rememberRule: event.target.value ? draft.rememberRule : false,
                   })}
                 >
@@ -759,6 +771,22 @@ function FragmentRow(props: RowProps) {
                   ))}
                 </select>
               </label>
+              {draft.classification === 'TRANSFER' && (
+                <label>
+                  Savings effect
+                  <select
+                    value={draft.savings_effect}
+                    onChange={(event) => props.onDraft({
+                      ...draft,
+                      savings_effect: event.target.value as SavingsEffect,
+                    })}
+                  >
+                    <option value="NONE">None</option>
+                    <option value="CONTRIBUTION">Contribution</option>
+                    <option value="WITHDRAWAL">Withdrawal</option>
+                  </select>
+                </label>
+              )}
               {mode === 'review' && assignableBuckets.length > 0 && (
                 <details className="inline-category-create">
                   <summary>+ Create new subcategory</summary>

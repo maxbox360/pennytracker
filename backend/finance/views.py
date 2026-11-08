@@ -1,4 +1,7 @@
 import re
+from datetime import date
+from django.core.paginator import Paginator
+from django.db.models import Max
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
@@ -32,6 +35,7 @@ from .categorization_rules import (
 from .models import (
     Account,
     BudgetBucket,
+    BudgetTargetSettings,
     CategorizationRule,
     DuplicateResolution,
     ImportBatch,
@@ -42,16 +46,84 @@ from .models import (
 )
 from .serializers import (
     AccountSerializer,
+    BudgetTargetSettingsSerializer,
     CategorizationRuleSerializer,
     ImportBatchSerializer,
     SubcategorySerializer,
     TransactionSerializer,
 )
+from .accounting import drilldown_rows, monthly_report
 
 
 class AccountViewSet(ModelViewSet):
     queryset = Account.objects.all()
     serializer_class = AccountSerializer
+
+
+@api_view(['GET', 'PUT'])
+def budget_target_settings(request):
+    settings_record = BudgetTargetSettings.objects.get(pk=1)
+    if request.method == 'GET':
+        return Response(BudgetTargetSettingsSerializer(settings_record).data)
+    serializer = BudgetTargetSettingsSerializer(
+        settings_record,
+        data=request.data,
+        partial=True,
+    )
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)
+
+
+def report_period(request):
+    year = request.query_params.get('year')
+    month = request.query_params.get('month')
+    if bool(year) != bool(month):
+        raise ValidationError({'period': 'Provide both year and month, or neither.'})
+    if year and month:
+        if not year.isdecimal() or not month.isdecimal():
+            raise ValidationError({'period': 'Use numeric year and month values.'})
+        year_value, month_value = int(year), int(month)
+        if not 1 <= month_value <= 12 or not 1 <= year_value <= 9999:
+            raise ValidationError({'period': 'Choose a valid calendar month.'})
+        return year_value, month_value
+    latest = Transaction.objects.aggregate(latest=Max('date'))['latest']
+    selected = latest or date.today()
+    return selected.year, selected.month
+
+
+@api_view(['GET'])
+def monthly_report_view(request):
+    year, month = report_period(request)
+    targets = BudgetTargetSettings.objects.get(pk=1)
+    result = monthly_report(year, month, targets)
+    for key in ('_eligible_ids', '_contributions', '_records'):
+        result.pop(key)
+    return Response(result)
+
+
+@api_view(['GET'])
+def monthly_report_drilldown(request):
+    year, month = report_period(request)
+    metric = request.query_params.get('metric', '')
+    subcategory_value = request.query_params.get('subcategory')
+    subcategory_id = None
+    if subcategory_value is not None:
+        if not subcategory_value.isdecimal():
+            raise ValidationError({'subcategory': 'Use a subcategory ID.'})
+        subcategory_id = int(subcategory_value)
+    report = monthly_report(year, month, BudgetTargetSettings.objects.get(pk=1))
+    try:
+        rows = drilldown_rows(report, metric, subcategory_id)
+    except ValueError as error:
+        raise ValidationError({'metric': str(error)}) from error
+    page = Paginator(rows, 100).get_page(request.query_params.get('page', 1))
+    return Response({
+        'count': len(rows),
+        'next': page.next_page_number() if page.has_next() else None,
+        'previous': page.previous_page_number() if page.has_previous() else None,
+        'results': rows[(page.number - 1) * 100:page.number * 100],
+    })
 
 
 class SubcategoryViewSet(ModelViewSet):

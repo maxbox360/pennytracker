@@ -3,6 +3,7 @@ import { apiFetch } from './api'
 import TransactionTable from './TransactionTable'
 import Categories from './Categories'
 import Rules from './Rules'
+import Reports from './Reports'
 import './App.css'
 
 type Account = { id: number; name: string; is_active: boolean }
@@ -74,7 +75,7 @@ function formatAmount(amount: string) {
 
 function App() {
   const [reload, setReload] = useState(0)
-  const [view, setView] = useState<'transactions' | 'review' | 'categories' | 'rules'>('transactions')
+  const [view, setView] = useState<'transactions' | 'review' | 'categories' | 'rules' | 'reports'>('transactions')
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem('pennytracker-theme')
     return saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system'
@@ -175,6 +176,14 @@ function App() {
           >
             Rules
           </button>
+          <button
+            className={`nav-item ${view === 'reports' ? 'nav-item--active' : ''}`}
+            type="button"
+            aria-current={view === 'reports' ? 'page' : undefined}
+            onClick={() => setView('reports')}
+          >
+            Reports
+          </button>
         </nav>
         <div className="sidebar-footer">
           <label className="theme-control">
@@ -192,7 +201,7 @@ function App() {
       <main className="main-content">
         <header className="page-header">
           <div>
-            <h1>{view === 'review' ? 'Review' : view === 'categories' ? 'Categories' : view === 'rules' ? 'Rules' : 'Transactions'}</h1>
+            <h1>{view === 'review' ? 'Review' : view === 'categories' ? 'Categories' : view === 'rules' ? 'Rules' : view === 'reports' ? 'Reports' : 'Transactions'}</h1>
             <p className="page-description">
               {view === 'review'
                 ? 'Resolve unknown classifications, uncategorized activity, and possible duplicates.'
@@ -200,6 +209,8 @@ function App() {
                   ? 'Manage the subcategories used to organize transactions.'
                   : view === 'rules'
                     ? 'Manage the deterministic rules used to categorize future expenses.'
+                    : view === 'reports'
+                      ? 'Review monthly income, allocations, Savings activity, and transactions behind every total.'
                     : 'A clear view of activity across your accounts.'}
             </p>
           </div>
@@ -377,7 +388,9 @@ function App() {
           </section>
         )}
 
-        {view === 'categories'
+        {view === 'reports'
+          ? <Reports reload={reload} />
+          : view === 'categories'
           ? <Categories />
           : view === 'rules'
             ? <Rules reload={reload} onChanged={() => setReload((current) => current + 1)} />

@@ -17,6 +17,7 @@ from .categorization_rules import (
     pending_matches_for_rule,
     rule_matches,
 )
+from .accounting import drilldown_rows, monthly_report
 from .csv_imports import (
     MAX_UPLOAD_BYTES,
     DuplicateImportError,
@@ -30,10 +31,12 @@ from .csv_imports import (
 from .models import (
     Account,
     BudgetBucket,
+    BudgetTargetSettings,
     CategorizationRule,
     DuplicateResolution,
     ImportBatch,
     ReviewStatus,
+    SavingsEffect,
     RuleMatchField,
     RuleMatchType,
     Subcategory,
@@ -141,14 +144,14 @@ class TransactionModelTests(TestCase):
         transaction = Transaction.objects.create(
             account=self.account,
             date=date(2026, 1, 15),
-            raw_description='SQ *LOCAL COFFEE ROA 4791234567 AR',
+            raw_description='CARD PURCHASE COFFEE SHOP 1234',
             merchant='Local Coffee Roaster',
             amount=Decimal('-1.29'),
         )
 
         transaction.refresh_from_db()
         self.assertEqual(transaction.amount, Decimal('-1.29'))
-        self.assertEqual(transaction.raw_description, 'SQ *LOCAL COFFEE ROA 4791234567 AR')
+        self.assertEqual(transaction.raw_description, 'CARD PURCHASE COFFEE SHOP 1234')
         self.assertEqual(transaction.merchant, 'Local Coffee Roaster')
 
 
@@ -940,13 +943,13 @@ class CategorizationRuleTests(TestCase):
         self.wants = Subcategory.objects.create(name='Fast Food', budget_bucket=BudgetBucket.WANTS)
         self.needs = Subcategory.objects.create(name='Restaurants', budget_bucket=BudgetBucket.NEEDS)
         self.rule = CategorizationRule.objects.create(
-            name='Popeyes',
-            match_value='POPEYES',
+            name='Example Cafe',
+            match_value='COFFEE SHOP',
             classification=Transaction.Classification.EXPENSE,
             subcategory=self.wants,
         )
 
-    def transaction_record(self, description='POPEYES 13171', classification='EXPENSE', **kwargs):
+    def transaction_record(self, description='COFFEE SHOP 1234', classification='EXPENSE', **kwargs):
         return Transaction.objects.create(
             account=self.account,
             date=date(2026, 11, 1),
@@ -957,32 +960,32 @@ class CategorizationRuleTests(TestCase):
         )
 
     def test_normalization_trims_collapses_whitespace_and_case_folds_only(self):
-        self.assertEqual(normalize_rule_text('  Popeyes\t  13171  '), 'popeyes 13171')
-        self.assertNotEqual(normalize_rule_text('POPEYES*'), normalize_rule_text('POPEYES'))
+        self.assertEqual(normalize_rule_text('  COFFEE SHOP\t  1234  '), 'coffee shop 1234')
+        self.assertNotEqual(normalize_rule_text('COFFEE SHOP*'), normalize_rule_text('COFFEE SHOP'))
 
-    def test_rule_matches_expense_but_not_unknown_or_transfer_popeyes_rows(self):
-        self.rule.match_value = 'POPEYES 13171'
-        self.assertTrue(rule_matches(self.rule, 'EXPENSE', 'POPEYES  13171'))
-        self.assertFalse(rule_matches(self.rule, 'UNKNOWN', 'Roundup *Popeyes 13171'))
-        self.assertFalse(rule_matches(self.rule, 'TRANSFER', 'Roundup *Popeyes 13171'))
-        self.assertFalse(rule_matches(self.rule, 'REFUND', 'Popeyes refund'))
+    def test_rule_matches_expense_but_not_unknown_or_transfer_roundup_rows(self):
+        self.rule.match_value = 'COFFEE SHOP'
+        self.assertTrue(rule_matches(self.rule, 'EXPENSE', 'COFFEE SHOP  1234'))
+        self.assertFalse(rule_matches(self.rule, 'UNKNOWN', 'ROUNDUP *COFFEE SHOP 1234'))
+        self.assertFalse(rule_matches(self.rule, 'TRANSFER', 'ROUNDUP *COFFEE SHOP 1234'))
+        self.assertFalse(rule_matches(self.rule, 'REFUND', 'Example Cafe refund'))
         self.assertFalse(rule_matches(self.rule, 'EXPENSE', 'Different merchant'))
 
     def test_same_target_multiple_matches_are_allowed_but_different_targets_conflict(self):
         second_same_target = CategorizationRule.objects.create(
-            match_value='Popeyes 13171',
+            match_value='COFFEE SHOP 1234',
             subcategory=self.wants,
         )
-        result = evaluate_rules('EXPENSE', 'Popeyes 13171', [self.rule, second_same_target])
+        result = evaluate_rules('EXPENSE', 'COFFEE SHOP 1234', [self.rule, second_same_target])
         self.assertFalse(result['conflict'])
         self.assertEqual(result['subcategory'], self.wants)
         self.assertEqual(result['rule'], self.rule)
 
         conflicting = CategorizationRule.objects.create(
-            match_value='13171',
+            match_value='1234',
             subcategory=self.needs,
         )
-        result = evaluate_rules('EXPENSE', 'Popeyes 13171', [self.rule, second_same_target, conflicting])
+        result = evaluate_rules('EXPENSE', 'COFFEE SHOP 1234', [self.rule, second_same_target, conflicting])
         self.assertTrue(result['conflict'])
         self.assertIsNone(result['subcategory'])
         self.assertEqual(len(result['rules']), 3)
@@ -1003,11 +1006,11 @@ class CategorizationRuleTests(TestCase):
 
         self.wants.is_active = False
         self.wants.save()
-        self.assertFalse(rule_matches(self.rule, 'EXPENSE', 'Popeyes 13171'))
+        self.assertFalse(rule_matches(self.rule, 'EXPENSE', 'COFFEE SHOP 1234'))
         self.wants.is_active = True
         self.wants.budget_bucket = BudgetBucket.SAVINGS
         self.wants.save()
-        self.assertFalse(rule_matches(self.rule, 'EXPENSE', 'Popeyes 13171'))
+        self.assertFalse(rule_matches(self.rule, 'EXPENSE', 'COFFEE SHOP 1234'))
 
 
 class CsvImportApiTests(APITestCase):
@@ -1053,11 +1056,11 @@ class CsvImportApiTests(APITestCase):
 
     def test_preview_and_confirmation_apply_rules_but_do_not_infer_classification(self):
         fast_food = Subcategory.objects.create(name='Fast Food', budget_bucket=BudgetBucket.WANTS)
-        rule = CategorizationRule.objects.create(match_value='POPEYES', subcategory=fast_food)
+        rule = CategorizationRule.objects.create(match_value='COFFEE SHOP', subcategory=fast_food)
         content = (
             b'Date,Description,Type,Amount,Status\n'
-            b'2026-11-01,POPEYES 13171,DEBIT_CARD,-12.00,Posted\n'
-            b'2026-11-02,Roundup *Popeyes 13171,ROUNDUP,-0.25,Posted\n'
+            b'2026-11-01,COFFEE SHOP 1234,DEBIT_CARD,-12.00,Posted\n'
+            b'2026-11-02,ROUNDUP *COFFEE SHOP 1234,ROUNDUP,-0.25,Posted\n'
         )
         preview = self.client.post(
             '/api/imports/preview/',
@@ -1094,11 +1097,11 @@ class CsvImportApiTests(APITestCase):
     def test_preview_displays_rule_conflicts_and_confirmation_keeps_them_pending(self):
         fast_food = Subcategory.objects.create(name='Fast Food', budget_bucket=BudgetBucket.WANTS)
         dining = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.NEEDS)
-        CategorizationRule.objects.create(match_value='POPEYES', subcategory=fast_food)
-        CategorizationRule.objects.create(match_value='13171', subcategory=dining)
+        CategorizationRule.objects.create(match_value='COFFEE SHOP', subcategory=fast_food)
+        CategorizationRule.objects.create(match_value='1234', subcategory=dining)
         content = (
             b'Date,Description,Type,Amount,Status\n'
-            b'2026-11-01,POPEYES 13171,DEBIT_CARD,-12.00,Posted\n'
+            b'2026-11-01,COFFEE SHOP 1234,DEBIT_CARD,-12.00,Posted\n'
         )
         preview = self.client.post(
             '/api/imports/preview/',
@@ -1125,10 +1128,10 @@ class CsvImportApiTests(APITestCase):
 
     def test_possible_duplicate_may_be_categorized_but_stays_pending(self):
         fast_food = Subcategory.objects.create(name='Fast Food', budget_bucket=BudgetBucket.WANTS)
-        CategorizationRule.objects.create(match_value='POPEYES', subcategory=fast_food)
+        CategorizationRule.objects.create(match_value='COFFEE SHOP', subcategory=fast_food)
         first = (
             b'Date,Description,Type,Amount,Status\n'
-            b'2026-11-01,POPEYES original,DEBIT_CARD,-12.00,Posted\n'
+            b'2026-11-01,COFFEE SHOP original,DEBIT_CARD,-12.00,Posted\n'
         )
         self.client.post(
             '/api/imports/',
@@ -1137,14 +1140,14 @@ class CsvImportApiTests(APITestCase):
         )
         second = (
             b'Date,Description,Type,Amount,Status\n'
-            b'2026-11-01,POPEYES changed,DEBIT_CARD,-12.00,Posted\n'
+            b'2026-11-01,COFFEE SHOP changed,DEBIT_CARD,-12.00,Posted\n'
         )
         self.client.post(
             '/api/imports/',
             {'account': self.account.id, 'file': self.upload('second.csv', second)},
             format='multipart',
         )
-        possible = Transaction.objects.get(raw_description='POPEYES changed')
+        possible = Transaction.objects.get(raw_description='COFFEE SHOP changed')
         self.assertEqual(possible.subcategory, fast_food)
         self.assertEqual(possible.duplicate_resolution, DuplicateResolution.UNRESOLVED)
         self.assertEqual(possible.review_status, ReviewStatus.PENDING)
@@ -1510,7 +1513,7 @@ class CsrfFlowTests(TestCase):
         body = {
             'match_field': 'RAW_DESCRIPTION',
             'match_type': 'CONTAINS',
-            'match_value': 'POPEYES',
+            'match_value': 'COFFEE SHOP',
             'classification': 'EXPENSE',
             'subcategory': category.id,
         }
@@ -1540,14 +1543,14 @@ class CategorizationRuleApiTests(APITestCase):
         self.wants = Subcategory.objects.create(name='Fast Food', budget_bucket=BudgetBucket.WANTS)
         self.needs = Subcategory.objects.create(name='Restaurants', budget_bucket=BudgetBucket.NEEDS)
 
-    def create_rule(self, value='POPEYES', subcategory=None, **extra):
+    def create_rule(self, value='COFFEE SHOP', subcategory=None, **extra):
         return CategorizationRule.objects.create(
             match_value=value,
             subcategory=subcategory or self.wants,
             **extra,
         )
 
-    def create_transaction(self, description='POPEYES 13171', **extra):
+    def create_transaction(self, description='COFFEE SHOP 1234', **extra):
         return Transaction.objects.create(
             account=self.account,
             date=date(2026, 11, 1),
@@ -1561,7 +1564,7 @@ class CategorizationRuleApiTests(APITestCase):
         return {
             'match_field': 'RAW_DESCRIPTION',
             'match_type': 'CONTAINS',
-            'match_value': 'POPEYES',
+            'match_value': 'COFFEE SHOP',
             'classification': 'EXPENSE',
             'subcategory': self.wants.id,
             **overrides,
@@ -1570,14 +1573,14 @@ class CategorizationRuleApiTests(APITestCase):
     def test_rule_crud_normalizes_values_and_rejects_normalized_active_duplicates(self):
         created = self.client.post(
             '/api/categorization-rules/',
-            self.payload(match_value='  Popeyes\t  13171  '),
+            self.payload(match_value='  COFFEE SHOP\t  1234  '),
             format='json',
         )
         self.assertEqual(created.status_code, 201)
-        self.assertEqual(created.data['match_value'], 'Popeyes 13171')
+        self.assertEqual(created.data['match_value'], 'COFFEE SHOP 1234')
         duplicate = self.client.post(
             '/api/categorization-rules/',
-            self.payload(match_value='POPEYES 13171'),
+            self.payload(match_value='COFFEE SHOP 1234'),
             format='json',
         )
         self.assertEqual(duplicate.status_code, 400)
@@ -1638,7 +1641,7 @@ class CategorizationRuleApiTests(APITestCase):
         record.save()
         response = self.client.patch(
             f'/api/categorization-rules/{rule.id}/',
-            {'match_value': 'POPEYES NEW'},
+            {'match_value': 'COFFEE SHOP NEW'},
             format='json',
         )
         self.assertEqual(response.status_code, 200)
@@ -1662,7 +1665,7 @@ class CategorizationRuleApiTests(APITestCase):
         )
 
         same_category = self.create_transaction(
-            'POPEYES same category',
+            'COFFEE SHOP same category',
             subcategory=self.wants,
             categorized_by_rule=rule,
         )
@@ -1685,7 +1688,7 @@ class CategorizationRuleApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(CategorizationRule.objects.count(), 0)
 
-        other = self.create_transaction('POPEYES second')
+        other = self.create_transaction('COFFEE SHOP second')
         response = self.client.post(
             f'/api/transactions/{record.id}/save-with-rule/',
             {
@@ -1693,12 +1696,12 @@ class CategorizationRuleApiTests(APITestCase):
                 'subcategory': self.wants.id,
                 'merchant': '',
                 'notes': '',
-                'match_value': '  POPEYES  ',
+                'match_value': '  COFFEE SHOP  ',
             },
             format='json',
         )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data['rule']['match_value'], 'POPEYES')
+        self.assertEqual(response.data['rule']['match_value'], 'COFFEE SHOP')
         self.assertEqual(response.data['matching_pending_count'], 1)
         self.assertEqual(response.data['rule']['subcategory'], self.wants.id)
         self.assertIsNone(response.data['transaction']['categorized_by_rule'])
@@ -1711,7 +1714,7 @@ class CategorizationRuleApiTests(APITestCase):
             {
                 'classification': 'EXPENSE',
                 'subcategory': self.wants.id,
-                'match_value': 'POPEYES',
+                'match_value': 'COFFEE SHOP',
             },
             format='json',
         )
@@ -1722,11 +1725,11 @@ class CategorizationRuleApiTests(APITestCase):
     def test_apply_pending_searches_past_page_and_recomputes_review_state(self):
         rule = self.create_rule()
         ordinary = [
-            self.create_transaction(f'POPEYES {number}')
+            self.create_transaction(f'COFFEE SHOP {number}')
             for number in range(101)
         ]
         possible_duplicate = self.create_transaction(
-            'POPEYES unresolved',
+            'COFFEE SHOP unresolved',
             duplicate_resolution=DuplicateResolution.UNRESOLVED,
         )
         counts = self.client.get(f'/api/categorization-rules/{rule.id}/pending-matches/')
@@ -1747,7 +1750,7 @@ class CategorizationRuleApiTests(APITestCase):
 
     def test_conflicting_pending_matches_are_not_applied(self):
         rule = self.create_rule()
-        CategorizationRule.objects.create(match_value='13171', subcategory=self.needs)
+        CategorizationRule.objects.create(match_value='1234', subcategory=self.needs)
         record = self.create_transaction()
         counts = self.client.get(f'/api/categorization-rules/{rule.id}/pending-matches/')
         self.assertEqual(counts.data['matching_pending_count'], 0)
@@ -1763,8 +1766,8 @@ class CategorizationRuleApiTests(APITestCase):
 
     def test_apply_pending_is_atomic_when_a_transaction_cannot_be_saved(self):
         rule = self.create_rule()
-        first = self.create_transaction('POPEYES first')
-        second = self.create_transaction('POPEYES second')
+        first = self.create_transaction('COFFEE SHOP first')
+        second = self.create_transaction('COFFEE SHOP second')
         original_save = Transaction.save
 
         def fail_second(record, *args, **kwargs):
@@ -1779,3 +1782,265 @@ class CategorizationRuleApiTests(APITestCase):
         second.refresh_from_db()
         self.assertIsNone(first.subcategory)
         self.assertIsNone(second.subcategory)
+
+
+class MonthlyAccountingTests(APITestCase):
+    def setUp(self):
+        self.account = Account.objects.create(name='Checking')
+        self.needs = Subcategory.objects.create(name='Groceries', budget_bucket=BudgetBucket.NEEDS)
+        self.wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
+        self.savings = Subcategory.objects.create(name='Emergency Fund', budget_bucket=BudgetBucket.SAVINGS)
+        BudgetTargetSettings.objects.get(pk=1)
+
+    def create_transaction(
+        self,
+        day=15,
+        classification=Transaction.Classification.EXPENSE,
+        amount='-10.00',
+        subcategory=None,
+        month=10,
+        year=2026,
+        **kwargs,
+    ):
+        return Transaction.objects.create(
+            account=self.account,
+            date=date(year, month, day),
+            posted_date=kwargs.pop('posted_date', None),
+            raw_description=kwargs.pop('raw_description', f'Synthetic {classification}'),
+            amount=Decimal(amount),
+            classification=classification,
+            subcategory=subcategory,
+            **kwargs,
+        )
+
+    def report(self, month=10):
+        return monthly_report(2026, month, BudgetTargetSettings.objects.get(pk=1))
+
+    def test_monthly_report_defaults_to_latest_transaction_month_or_today(self):
+        response = self.client.get('/api/reports/monthly/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['period']['year'], date.today().year)
+        self.assertEqual(response.data['period']['month'], date.today().month)
+
+        self.create_transaction(year=2025, month=4)
+        self.create_transaction(year=2026, month=2)
+        response = self.client.get('/api/reports/monthly/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['period']['year'], 2026)
+        self.assertEqual(response.data['period']['month'], 2)
+
+    def test_signed_income_refunds_and_transaction_date_period_boundaries(self):
+        self.create_transaction(classification='INCOME', amount='1000.00', day=31, posted_date=date(2026, 11, 2))
+        self.create_transaction(classification='INCOME', amount='-100.00', day=1, month=10)
+        self.create_transaction(classification='TRANSFER', amount='1000.00', day=2)
+        self.create_transaction(classification='REFUND', amount='40.00', subcategory=self.wants, day=3)
+        self.create_transaction(classification='UNKNOWN', amount='500.00', day=4, source_type='DEPOSIT')
+        self.create_transaction(classification='INCOME', amount='25.00', day=1, month=11)
+
+        report = self.report()
+        self.assertEqual(report['summary']['income']['amount'], '900.00')
+        self.assertEqual(report['summary']['wants']['amount'], '-40.00')
+        self.assertEqual(report['summary']['income']['transaction_count'], 2)
+        self.assertEqual(report['data_completeness']['blockers']['UNKNOWN']['transaction_count'], 1)
+        self.assertEqual(report['period']['start_date'], '2026-10-01')
+        self.assertEqual(report['period']['end_date'], '2026-10-31')
+
+    def test_historical_bucket_and_current_subcategory_name_are_used(self):
+        expense = self.create_transaction(amount='-50.00', subcategory=self.needs)
+        refund = self.create_transaction(classification='REFUND', amount='20.00', subcategory=self.needs)
+        Subcategory.objects.filter(pk=self.needs.pk).update(
+            name='Household shopping',
+            budget_bucket=BudgetBucket.WANTS,
+            is_active=False,
+        )
+
+        report = self.report()
+        self.assertEqual(report['summary']['needs']['amount'], '30.00')
+        self.assertEqual(report['summary']['wants']['amount'], '0.00')
+        self.assertEqual(report['breakdown']['NEEDS'][0]['subcategory_name'], 'Household shopping')
+        self.assertEqual(report['_records'][expense.pk].budget_bucket, BudgetBucket.NEEDS)
+        self.assertEqual(report['_records'][refund.pk].budget_bucket, BudgetBucket.NEEDS)
+
+    def test_savings_contributions_withdrawals_and_remaining_are_separate(self):
+        self.create_transaction(classification='INCOME', amount='600.00')
+        self.create_transaction(amount='-50.00', subcategory=self.needs)
+        contribution = self.create_transaction(
+            classification='TRANSFER',
+            amount='-500.00',
+            subcategory=self.savings,
+            savings_effect=SavingsEffect.CONTRIBUTION,
+        )
+        withdrawal = self.create_transaction(
+            classification='TRANSFER',
+            amount='100.00',
+            subcategory=self.savings,
+            savings_effect=SavingsEffect.WITHDRAWAL,
+        )
+        ordinary = self.create_transaction(
+            classification='TRANSFER',
+            amount='-900.00',
+            subcategory=self.savings,
+        )
+        ordinary.mark_reviewed()
+
+        report = self.report()
+        self.assertEqual(report['summary']['savings_contributions']['amount'], '500.00')
+        self.assertEqual(report['summary']['savings_withdrawals']['amount'], '100.00')
+        self.assertEqual(report['summary']['net_savings_activity']['amount'], '400.00')
+        self.assertEqual(report['summary']['remaining']['amount'], '50.00')
+        self.assertEqual(report['breakdown']['SAVINGS'][0]['amount'], '400.00')
+        self.assertEqual(report['_contributions'][contribution.pk][1], Decimal('500.00'))
+        self.assertEqual(report['_contributions'][withdrawal.pk][1], Decimal('100.00'))
+        self.assertNotIn(ordinary.pk, report['_contributions'])
+
+    def test_negative_bucket_totals_are_not_clamped(self):
+        self.create_transaction(classification='REFUND', amount='35.00', subcategory=self.wants)
+        report = self.report()
+        self.assertEqual(report['summary']['wants']['amount'], '-35.00')
+        self.assertIsNone(report['summary']['wants']['actual_percent'])
+
+    def test_unresolved_unknown_uncategorized_conflict_and_pending_transfer_are_flagged(self):
+        self.create_transaction(classification='UNKNOWN', amount='9.00')
+        self.create_transaction(classification='EXPENSE', amount='-8.00')
+        self.create_transaction(
+            classification='EXPENSE',
+            amount='-7.00',
+            categorization_rule_conflict=True,
+        )
+        pending_transfer = self.create_transaction(classification='TRANSFER', amount='-6.00')
+        possible = self.create_transaction(classification='EXPENSE', amount='-5.00', subcategory=self.needs)
+        candidate = self.create_transaction(
+            classification='EXPENSE',
+            amount='-5.00',
+            subcategory=self.needs,
+            day=14,
+        )
+        possible.duplicate_candidates.add(candidate)
+        possible.duplicate_resolution = DuplicateResolution.UNRESOLVED
+        possible.save()
+        distinct = self.create_transaction(classification='EXPENSE', amount='-4.00', subcategory=self.needs)
+        distinct.duplicate_candidates.add(candidate)
+        distinct.duplicate_resolution = DuplicateResolution.DISTINCT
+        distinct.save()
+        excluded = self.create_transaction(classification='EXCLUDED', amount='-3.00')
+        confirmed = self.create_transaction(classification='EXPENSE', amount='-2.00', subcategory=self.needs)
+        confirmed.duplicate_candidates.add(candidate)
+        confirmed.duplicate_resolution = DuplicateResolution.CONFIRMED_DUPLICATE
+        confirmed.duplicate_of = candidate
+        confirmed.save()
+
+        report = self.report()
+        self.assertEqual(report['summary']['needs']['amount'], '9.00')
+        self.assertEqual(report['data_completeness']['affected_transaction_count'], 5)
+        self.assertEqual(report['data_completeness']['blockers']['TRANSFER_SAVINGS_UNREVIEWED']['transaction_count'], 1)
+        self.assertEqual(report['data_completeness']['excluded']['excluded'], 1)
+        self.assertEqual(report['data_completeness']['excluded']['confirmed_duplicate'], 1)
+        self.assertNotIn(pending_transfer.pk, report['_eligible_ids'])
+        self.assertNotIn(excluded.pk, report['_eligible_ids'])
+
+    def test_reviewed_transfer_with_no_effect_is_intentionally_ordinary(self):
+        transfer = self.create_transaction(classification='TRANSFER', amount='-40.00')
+        transfer.mark_reviewed()
+        report = self.report()
+        self.assertFalse(report['data_completeness']['is_incomplete'])
+        self.assertNotIn(transfer.pk, report['_eligible_ids'])
+
+    def test_savings_effect_api_requires_transfer_and_savings_subcategory(self):
+        expense = self.create_transaction(classification='EXPENSE', subcategory=self.needs)
+        response = self.client.patch(
+            f'/api/transactions/{expense.pk}/',
+            {'savings_effect': 'CONTRIBUTION'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('savings_effect', response.data)
+
+        transfer = self.create_transaction(classification='TRANSFER')
+        response = self.client.patch(
+            f'/api/transactions/{transfer.pk}/',
+            {'savings_effect': 'WITHDRAWAL'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Savings subcategory', str(response.data))
+
+        response = self.client.patch(
+            f'/api/transactions/{transfer.pk}/',
+            {'subcategory': self.savings.pk, 'savings_effect': 'CONTRIBUTION'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['savings_effect'], 'CONTRIBUTION')
+        for effect in ('WITHDRAWAL', 'NONE'):
+            response = self.client.patch(
+                f'/api/transactions/{transfer.pk}/',
+                {'savings_effect': effect},
+                format='json',
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data['savings_effect'], effect)
+
+    def test_budget_targets_allow_independent_percentages_and_do_not_mutate_history(self):
+        transaction_record = self.create_transaction(amount='-30.00', subcategory=self.needs)
+        before = transaction_record.updated_at
+        response = self.client.put(
+            '/api/budget-targets/',
+            {'needs_percent': '50.00', 'wants_percent': '32.00', 'savings_percent': '20.00'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['wants_percent'], '32.00')
+        self.assertEqual(sum(Decimal(response.data[key]) for key in response.data), Decimal('102.00'))
+        report = self.client.get('/api/reports/monthly/?year=2026&month=10')
+        self.assertEqual(report.status_code, 200)
+        self.assertEqual(report.data['summary']['wants']['target_percent'], '32.00')
+        transaction_record.refresh_from_db()
+        self.assertEqual(transaction_record.updated_at, before)
+
+        invalid = self.client.put(
+            '/api/budget-targets/',
+            {'needs_percent': '100.01'},
+            format='json',
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_viewing_old_report_has_no_database_side_effect(self):
+        before_targets = list(BudgetTargetSettings.objects.values())
+        before_transactions = list(Transaction.objects.values())
+        self.client.get('/api/reports/monthly/?year=2020&month=1')
+        self.assertEqual(list(BudgetTargetSettings.objects.values()), before_targets)
+        self.assertEqual(list(Transaction.objects.values()), before_transactions)
+
+    def test_monthly_drilldowns_reconcile_with_report_totals(self):
+        self.create_transaction(classification='INCOME', amount='200.00')
+        self.create_transaction(amount='-80.00', subcategory=self.needs)
+        self.create_transaction(classification='REFUND', amount='20.00', subcategory=self.needs)
+        self.create_transaction(amount='-25.00', subcategory=self.wants)
+        self.create_transaction(
+            classification='TRANSFER',
+            amount='-30.00',
+            subcategory=self.savings,
+            savings_effect=SavingsEffect.CONTRIBUTION,
+        )
+        report = self.report()
+        for metric, expected in (
+            ('income', Decimal('200.00')),
+            ('needs', Decimal('60.00')),
+            ('wants', Decimal('25.00')),
+            ('savings_contributions', Decimal('30.00')),
+            ('remaining', Decimal('85.00')),
+        ):
+            rows = drilldown_rows(report, metric)
+            self.assertEqual(sum(Decimal(row['contribution']) for row in rows), expected, metric)
+
+        response = self.client.get('/api/reports/monthly/drilldown/?year=2026&month=10&metric=needs')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 2)
+        self.assertEqual(sum(Decimal(row['contribution']) for row in response.data['results']), Decimal('60.00'))
+
+    def test_negative_income_percentages_are_not_reported_and_remaining_can_be_negative(self):
+        self.create_transaction(classification='INCOME', amount='-10.00')
+        report = self.report()
+        self.assertIsNone(report['summary']['needs']['actual_percent'])
+        self.assertIsNone(report['summary']['needs']['variance_points'])
+        self.assertEqual(report['summary']['remaining']['amount'], '-10.00')

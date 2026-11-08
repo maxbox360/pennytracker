@@ -1,7 +1,9 @@
+from decimal import Decimal
+
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower, Trim
-from django.core.exceptions import ValidationError
 
 
 class BudgetBucket(models.TextChoices):
@@ -30,6 +32,12 @@ class DuplicateResolution(models.TextChoices):
     UNRESOLVED = 'UNRESOLVED', 'Unresolved'
     DISTINCT = 'DISTINCT', 'Distinct transaction'
     CONFIRMED_DUPLICATE = 'CONFIRMED_DUPLICATE', 'Confirmed duplicate'
+
+
+class SavingsEffect(models.TextChoices):
+    NONE = 'NONE', 'None'
+    CONTRIBUTION = 'CONTRIBUTION', 'Contribution'
+    WITHDRAWAL = 'WITHDRAWAL', 'Withdrawal'
 
 
 class RuleMatchField(models.TextChoices):
@@ -161,10 +169,38 @@ class CategorizationRule(models.Model):
         return self.name.strip() or f'{self.classification} description contains "{self.match_value}"'
 
 
+class BudgetTargetSettings(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    needs_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('50.00'))
+    wants_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('30.00'))
+    savings_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('20.00'))
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(id=1),
+                name='single_budget_target_settings',
+            ),
+            models.CheckConstraint(
+                condition=Q(needs_percent__gte=0, needs_percent__lte=100),
+                name='valid_needs_target_percent',
+            ),
+            models.CheckConstraint(
+                condition=Q(wants_percent__gte=0, wants_percent__lte=100),
+                name='valid_wants_target_percent',
+            ),
+            models.CheckConstraint(
+                condition=Q(savings_percent__gte=0, savings_percent__lte=100),
+                name='valid_savings_target_percent',
+            ),
+        ]
+
+
 class Transaction(models.Model):
     Classification = TransactionClassification
     ReviewStatus = ReviewStatus
     DuplicateResolution = DuplicateResolution
+    SavingsEffect = SavingsEffect
 
     account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name='transactions')
     subcategory = models.ForeignKey(
@@ -200,6 +236,11 @@ class Transaction(models.Model):
         max_length=10,
         choices=Classification.choices,
         default=Classification.UNKNOWN,
+    )
+    savings_effect = models.CharField(
+        max_length=12,
+        choices=SavingsEffect.choices,
+        default=SavingsEffect.NONE,
     )
     budget_bucket = models.CharField(max_length=10, choices=BudgetBucket.choices, blank=True)
     review_status = models.CharField(
@@ -247,6 +288,18 @@ class Transaction(models.Model):
             models.CheckConstraint(
                 condition=Q(duplicate_resolution__in=DuplicateResolution.values),
                 name='valid_transaction_duplicate_resolution',
+            ),
+            models.CheckConstraint(
+                condition=Q(savings_effect__in=SavingsEffect.values),
+                name='valid_transaction_savings_effect',
+            ),
+            models.CheckConstraint(
+                condition=Q(savings_effect=SavingsEffect.NONE)
+                | Q(
+                    classification=TransactionClassification.TRANSFER,
+                    budget_bucket=BudgetBucket.SAVINGS,
+                ),
+                name='savings_effect_requires_transfer_snapshot',
             ),
             models.UniqueConstraint(
                 fields=('import_batch', 'source_row'),
@@ -344,6 +397,14 @@ class Transaction(models.Model):
         elif self.budget_bucket:
             self.budget_bucket = ''
             changed_fields.add('budget_bucket')
+        if self.savings_effect != SavingsEffect.NONE and (
+            self.classification != TransactionClassification.TRANSFER
+            or not self.subcategory_id
+            or self.budget_bucket != BudgetBucket.SAVINGS
+        ):
+            raise ValidationError({
+                'savings_effect': 'Savings contributions and withdrawals require a Transfer with a Savings subcategory.'
+            })
 
         if self.duplicate_resolution == DuplicateResolution.CONFIRMED_DUPLICATE:
             if not self.duplicate_of_id or not self.duplicate_candidates.filter(pk=self.duplicate_of_id).exists():

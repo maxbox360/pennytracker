@@ -151,12 +151,14 @@ Savings is NOT calculated as:
 
 Examples of qualifying Savings activity may include:
 
-- Money transferred to a designated savings account
+- A Transfer explicitly marked as a Savings contribution
+- A Transfer explicitly marked as a Savings withdrawal
 - Emergency fund contributions
 - Investment contributions
 - Other explicitly designated savings goals
 
 Money that simply remains in checking does not automatically count as Savings.
+Only a `TRANSFER` with a non-`NONE` transaction-level `savings_effect` and a Savings Subcategory qualifies. Exactly one transaction represents each Savings accounting effect; account type, transfer direction, or a Savings Subcategory alone never infers it. Contributions and withdrawals are separately reported; withdrawals reduce net Savings activity but do not increase Income or Remaining / Unallocated.
 
 The dashboard must distinguish:
 
@@ -187,12 +189,12 @@ Checking → Credit Card payment:
 
 Checking → Savings:
 - Do not count as Needs or Wants.
-- It may count as Savings if the destination or transaction is designated as a qualifying savings action.
+- Count as Savings only when one chosen ledger transaction is explicitly marked `CONTRIBUTION` or `WITHDRAWAL`.
 
 Checking → Checking:
 - Normally exclude from spending and income calculations.
 
-Movement between accounts owned by the user is `TRANSFER` activity, not Income or ordinary spending, regardless of direction. A generic bank source type such as `DEPOSIT` is ambiguous and must remain `UNKNOWN` unless the user or a transparent categorization rule resolves it. Future Savings contributions/withdrawals may be derived from transfer direction; if both sides are imported, they must eventually be paired and counted as one economic transfer.
+Movement between accounts owned by the user is `TRANSFER` activity, not Income or ordinary spending, regardless of direction. A generic bank source type such as `DEPOSIT` is ambiguous and must remain `UNKNOWN` unless the user or a transparent categorization rule resolves it. Future transfer pairing may associate both ledger sides while retaining one canonical marked transaction as the Savings effect; do not infer or double-count Savings from both sides.
 
 Avoid double-counting transactions.
 
@@ -244,7 +246,7 @@ Example:
 
 Raw:
 
-`SQ *LOCAL COFFEE ROA 479123456`
+`CARD PURCHASE COFFEE SHOP 1234`
 
 Clean merchant:
 
@@ -426,6 +428,8 @@ If a table communicates something more clearly, use a table.
 
 Reporting should support All Time, calendar year, and month views, with trends over time and drill-down from aggregates to their contributing transactions. Custom date ranges should remain straightforward but need not be implemented before these core periods. Reporting periods are independent of ImportBatch boundaries and use transaction dates.
 
+Monthly reporting uses `Transaction.date` consistently for every classification, completeness count, and drilldown; `posted_date`, ImportBatch dates, and filenames never determine the report month. Current database-backed allocation targets are guideposts, need not total 100%, and are not snapshotted by viewing a report. Remaining / Unallocated is `Income - Needs - Wants - Savings Contributions`; Savings withdrawals do not increase it.
+
 ---
 
 # Drill-down behavior
@@ -548,6 +552,8 @@ Frontend snapshot tests are low priority.
 ---
 
 # Privacy
+
+Repository tests, fixtures, documentation, and UI examples must use synthetic/generic financial data, not real transaction descriptions observed during manual testing.
 
 Financial information must remain local in the initial application.
 

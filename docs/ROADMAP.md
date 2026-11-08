@@ -72,15 +72,19 @@ Implement one milestone at a time; keep the application runnable and verify each
 
 ## Milestone 5 — Accounting calculations and monthly reporting
 
-- Implement and test income, Needs/Wants expenses, linked refunds, credit-card payments, internal transfers, qualifying savings transfers, and exclusions.
-- Use posted date when available, otherwise transaction date. Count savings transfers once on the source-side posted date when available.
-- Calculate Remaining / Unallocated as income minus Needs, Wants, and actual qualifying Savings.
-- Snapshot configurable monthly allocation targets and applicable subcategory budgets when each month becomes relevant; no rollover or pre-created future months.
-- Build the monthly dashboard around target-versus-actual bars and auditable drill-downs.
+- Add an explicit `NONE` / `CONTRIBUTION` / `WITHDRAWAL` Savings effect to Transfers. A non-NONE effect requires a Savings Subcategory; a Savings Subcategory alone does not qualify. Exactly one chosen transaction represents each Savings effect. Do not pair transfers automatically.
+- Sum signed `INCOME` amounts. For eligible Needs/Wants Expenses and Refunds, contribute `-amount` using the transaction's historical bucket snapshot. Refunds offset the bucket in the Refund's own month; do not link refunds.
+- Calculate Savings contributions and withdrawals separately using the absolute ledger amount. Net Savings activity is contributions minus withdrawals. Remaining / Unallocated is signed Income minus Needs, Wants, and Savings contributions; withdrawals do not increase it.
+- Use `Transaction.date` for every report period and drilldown; never use posted date, import batches, or filenames to choose the month.
+- Exclude explicit exclusions, confirmed/unresolved duplicates, unresolved rule conflicts, UNKNOWN, uncategorized Expenses/Refunds, and invalid Savings effects. Surface unresolved blockers and do not treat `PENDING` as a universal exclusion.
+- Persist one current database allocation-target configuration (50/30/20 defaults; independent 0–100% values need not sum to 100%). Use current targets for all months and do not mutate settings when viewing reports.
+- Add a dense monthly Reports screen with month navigation, target/actual/percentage-point comparison, Subcategory breakdowns, completeness warnings, and paginated drilldowns that reconcile exactly to report amounts.
+- Do not add year/All-Time reports, trends, custom ranges, snapshots/effective-dated targets, transfer pairing, linked refunds, or Subcategory budgets.
 
 ## Milestone 6 — Historical reporting and export
 
-- Add All Time and calendar-year views, year-over-year comparisons, subcategory breakdowns, and spending/savings trends across months and years.
+- Add All Time and calendar-year views, year-over-year comparisons, subcategory breakdowns, and spending/Savings trends across months and years.
+- Consider effective-dated target history if preserving historical target comparisons becomes a confirmed requirement.
 - Keep all reporting periods independent of imports and drill from every aggregate to the contributing transactions using historical bucket snapshots.
 - Leave custom date ranges straightforward to add later; first deliver All Time, Year, and Month.
 - Add transaction and reporting-data export; consider historical spreadsheet migration separately.

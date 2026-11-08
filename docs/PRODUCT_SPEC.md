@@ -357,7 +357,7 @@ Rules must be visible, editable, disableable, and deliberately created by the us
 
 Matching trims outer whitespace, collapses internal whitespace runs, and compares case-insensitively. It does not strip punctuation, tokenize descriptions, or fuzzy-match. The same normalization is used for matching and duplicate-rule validation.
 
-Categorization rules assign a subcategory only. They never infer or change financial classification. Rules are classification-scoped, so an Expense rule does not categorize an UNKNOWN, INCOME, REFUND, TRANSFER, or EXCLUDED transaction. For example, an Expense rule matching `POPEYES` can categorize `POPEYES 13171`, but must not categorize `Roundup *Popeyes 13171` classified UNKNOWN or TRANSFER.
+Categorization rules assign a subcategory only. They never infer or change financial classification. Rules are classification-scoped, so an Expense rule does not categorize an UNKNOWN, INCOME, REFUND, TRANSFER, or EXCLUDED transaction. For example, an Expense rule matching `COFFEE SHOP` can categorize `COFFEE SHOP 1234`, but must not categorize `ROUNDUP *COFFEE SHOP 1234` classified UNKNOWN or TRANSFER.
 
 The Review editor may offer “Remember this for future matching expenses,” but the user must opt in and inspect/edit the exact match value before the rule is saved. The default proposed value is the full raw description; PennyTracker does not guess a shorter merchant token.
 
@@ -581,30 +581,9 @@ Use visual indicators to make over-target and under-target areas obvious without
 
 # 12. Allocation chart
 
-I want a visual representation of Needs, Wants, and Savings.
+The monthly Reports screen includes a restrained, auditable donut beside the summary. When Remaining / Unallocated is non-negative, Needs, Wants, Savings Contributions, and Remaining partition reported Income; Income itself, Savings Withdrawals, and Net Savings Activity are not slices. Each segment shows its amount/share and opens the existing transaction drilldown.
 
-My current preference is:
-
-Use a donut/pie chart for:
-
-- Needs
-- Wants
-- Savings
-
-Do **not** quietly include Remaining / Unallocated as Savings.
-
-Remaining / Unallocated should likely be displayed as a separate card or indicator near the chart.
-
-Please critique this approach and recommend another visualization only if it communicates the information more clearly.
-
-The chart should display:
-
-- Percentage
-- Dollar amount
-
-If useful, it should also show my target allocation for comparison.
-
-Clicking a section should ideally drill down into the related subcategories or transactions.
+If Remaining is negative, show only the positive Needs, Wants, and Savings Contributions, normalized as a **Share of allocations**, not a share of Income, and display the exact amount by which allocations exceed reported Income. If any allocation component is negative (for example, net Refund activity), do not clamp or absolute-value it; show a clear unavailable-chart explanation instead. Reuse report completeness data and label the visualization as partial when blockers exist.
 
 ---
 
@@ -1541,17 +1520,17 @@ Explain why.
 The following decisions refine and take precedence over earlier tentative options in this specification:
 
 - **Local development with Docker Compose:** Docker Compose is the recommended local development workflow, using the exact filename `docker-compose.yaml`. Run only the Django/DRF backend and React/Vite frontend application services, keep SQLite, and use source bind mounts for reloads. The stack is local-development only; no production orchestration or extra infrastructure services.
-- **Stable budget buckets:** Needs, Wants, and Savings are fixed domain values (`NEEDS`, `WANTS`, `SAVINGS`), not user-managed top-level categories. Users can edit, archive, and move subcategories. Allocation targets are configurable and snapshotted for each month when it becomes relevant.
+- **Stable budget buckets:** Needs, Wants, and Savings are fixed domain values (`NEEDS`, `WANTS`, `SAVINGS`), not user-managed top-level categories. Users can edit, archive, and move subcategories. Allocation targets are configurable; Milestone 5 uses the current targets for every month and does not snapshot them.
 - **Initial CSV support:** Start with one real CSV format supplied by the user. Do not build a generalized importer or plugin system until another real format requires it.
 - **Filename and account context:** Preserve the original filename on each Import Batch for audit purposes only. Transaction dates come from CSV contents; account identity comes from the account selected for the import. Filenames are never authoritative financial data.
 - **Duplicate handling:** Automatically reject only high-confidence duplicates. Transactions that merely resemble existing ones based on date, amount, or description go to review.
-- **Savings transfers:** Transfers into a designated savings-destination account qualify as Savings by default, with a per-transaction override. When both sides are imported, count the transfer once using the source-side posted date.
+- **Savings transfers:** Only a Transfer explicitly marked `CONTRIBUTION` or `WITHDRAWAL` with a Savings Subcategory qualifies as Savings. Exactly one deliberately chosen transaction represents each effect, independent of account side or amount sign; use its `Transaction.date`. Do not pair transfers automatically in Milestone 5.
 - **Refunds:** Link refunds to original purchases where possible and offset the original subcategory in the refund month. Unmatched refunds require review; they are not automatically income.
 - **Debt payments:** Required loan payments may be Needs in the MVP. The model must leave room for intentional extra debt paydown to count toward Savings or another financial goal later; principal/interest parsing is out of MVP scope.
 - **Balances and historical data:** Do not calculate or prominently display account balances in the MVP. Historical spreadsheet migration is deferred until the new-data workflow works.
-- **Monthly budgets:** No rollover. Snapshot the current allocation targets and applicable subcategory goals when a month becomes relevant; do not generate future monthly budget records in advance.
-- **Income date:** Use posted date when available, otherwise transaction date.
-- **Dashboard:** Use target-versus-actual bars as the primary allocation visualization. Any later donut chart must be clearly labeled and keep Remaining / Unallocated separate.
+- **Monthly budgets:** No rollover or generated future budget records. Milestone 5 has one current target configuration and does not snapshot targets or create monthly budget snapshots when reports are viewed. Effective-dated target history is deferred.
+- **Income date:** Monthly reports use `Transaction.date` for Income and every other classification. Keep `posted_date` as source/provenance information only.
+- **Dashboard:** Keep target-versus-actual comparisons primary. The monthly allocation donut is a secondary auditable view: it includes Remaining only when non-negative, labels the negative-Remaining mode as allocation mix, and never includes withdrawals or net Savings as allocations.
 - **Delivery scope:** Build and verify the import → categorization → review → monthly reporting workflow before prioritizing debt, recurring expenses, subscriptions, statement parsing, or other later features.
 - **Transaction classification and review are separate:** Classification values are `UNKNOWN`, `EXPENSE`, `INCOME`, `REFUND`, `TRANSFER`, and `EXCLUDED`. A transaction may be an `EXPENSE` without a subcategory. Any later review/categorization state must be stored separately from financial classification.
 - **Historical bucket snapshot:** A categorized transaction stores the applicable `NEEDS`, `WANTS`, or `SAVINGS` bucket as a snapshot. Assigning a subcategory defaults the snapshot from its current bucket; changing a subcategory's bucket does not rewrite existing transactions. An explicit recategorization may update the transaction's stored bucket.
@@ -1565,7 +1544,7 @@ The following decisions refine and take precedence over earlier tentative option
 - **Institution boundary:** The first concrete parser is specific to the supplied SoFi checking format. Source-specific headers, status interpretation, and classification hints stay in that parser; normalized transactions, ImportBatch, API resources, and future reports remain institution-independent. Add a second small parser only after inspecting a real second format.
 - **Overlapping imports:** Exact-file SHA-256 protection is supplemented by account-scoped fingerprint and multiplicity matching. Preserve batch, source row, source type, date, description, amount, and file hash as provenance; do not silently remove similar transactions.
 - **Reporting periods and analysis:** Reporting is based on transaction dates, never import-file or ImportBatch boundaries. The planned hierarchy is All Time → Year → Month → Transactions, with totals, subcategory breakdowns, monthly/yearly comparisons, trends over time, and auditable drill-downs. Custom date ranges should be straightforward later but are not required before All Time, Year, and Month.
-- **Savings and historical reporting:** All reporting must use each transaction's snapshotted Needs/Wants/Savings bucket. Savings remains actual qualifying activity; Remaining / Unallocated is income minus Needs, Wants, and Savings, never silently reclassified as Savings.
+- **Savings and historical reporting:** Needs/Wants reporting uses each transaction's snapshotted bucket. Savings requires an explicit Savings-effect marker and Savings Subcategory; a Savings bucket or Subcategory alone does not qualify. Remaining / Unallocated is Income minus Needs, Wants, and Savings Contributions, never silently reclassified as Savings.
 - **Overlapping imports:** Use account-scoped multiplicity matching. The current fingerprint uses transaction date, posted date when available, signed Decimal amount quantized to cents, source type trimmed and case-folded, and raw description trimmed, whitespace-collapsed, and case-folded. Account is the matching scope; merchant, filename, batch, and source row are not fingerprint fields. A future stable source transaction ID may provide stronger identity.
 - **Overlap terminology and behavior:** Fingerprint/multiplicity matches are called `already represented`, not certain duplicates. For each fingerprint, match up to the number of existing non-confirmed-duplicate occurrences; extra incoming occurrences are `possible duplicate` only if an existing candidate has the same account, date, and amount plus an equal normalized raw description or source type, otherwise they are new. Repeated identical rows in one new file are all preserved as new if no earlier occurrence exists. Possible duplicates are imported into Review. Preview shows each row's outcome before confirmation; confirm recomputes overlap atomically.
 - **Possible-duplicate context and resolution:** Preserve candidate transaction relationships so Review can show their account, date, raw description/merchant, amount, and source type. Duplicate resolution is separate from classification and review status: unresolved, distinct, or confirmed duplicate. Confirmed duplicates remain stored and auditable, reference the selected candidate, and are excluded from future financial totals without changing classification to `EXCLUDED`.
@@ -1590,6 +1569,19 @@ The following decisions refine and take precedence over earlier tentative option
 - **Categorization rules:** Initial rules support only `EXPENSE + raw description contains`. Trim and collapse whitespace and compare case-insensitively without punctuation rewriting or fuzzy matching. Rules assign categories, never financial classifications. Rule conflicts with different targets go to Review; same-target matches may categorize, with one matching rule retained only as representative provenance. The Review opt-in shows the exact editable match value before saving. Rule application never silently rewrites existing assignments, and manual category edits clear automatic-rule provenance.
 - **Milestone 4 scope:** Transparent categorization rules, import preview/confirmation application, explicit Review-created rules and pending-match application, Rules navigation/management, and rule provenance/conflict explanations. Archived targets remain visible but unusable. Do not add merchant matching, reporting/accounting calculations, transfer pairing, savings calculations, debt, or recurring expenses.
 - **Roadmap sequence:** Milestone 5 is accounting calculations and monthly reporting; Milestone 6 is historical/year/all-time reporting. These remain later work and are not started as part of Milestone 4.
+- **Monthly report period:** Every Milestone 5 monthly report, completeness count, and drilldown uses `Transaction.date` consistently. `posted_date` remains provenance only; ImportBatch ranges, import timestamps, and filenames never determine the report month.
+- **Income:** Sum signed amounts for eligible transactions explicitly classified `INCOME`. Negative adjustments reduce Income. `REFUND`, `TRANSFER`, `UNKNOWN`, generic `DEPOSIT`, and `EXCLUDED` do not become Income implicitly.
+- **Needs/Wants and Refunds:** For eligible `EXPENSE` and `REFUND` records with a Needs/Wants historical bucket snapshot, the report contribution is `-transaction.amount`. Refunds reduce the snapshotted bucket in the Refund transaction's month; there is no original-purchase linking in Milestone 5. Do not clamp negative results.
+- **Savings effect:** A Savings Subcategory alone does not qualify Savings. Exactly one chosen `TRANSFER` transaction must carry `savings_effect` `CONTRIBUTION` or `WITHDRAWAL` and a Savings Subcategory; `NONE` is an ordinary Transfer. The marked transaction's `Transaction.date` is the reporting date, and its signed ledger amount does not determine the effect direction; use its absolute amount.
+- **Savings and Remaining:** Report contributions and withdrawals separately; net Savings activity is contributions minus withdrawals. Savings allocation percentage/target uses contributions. `Remaining = signed Income - Needs - Wants - Savings Contributions`; withdrawals never increase Income or Remaining.
+- **Targets:** Persist one current database configuration, defaulting to Needs 50%, Wants 30%, Savings 20%; each target is independently 0–100% and they need not total 100%. Reports compare all months to current targets. Viewing a report never creates or snapshots targets; effective-dated target history is deferred.
+- **Reporting eligibility:** Exclude `EXCLUDED`, confirmed duplicates, unresolved possible duplicates, unresolved rule conflicts, `UNKNOWN`, uncategorized Expense/Refund, and invalid Savings effects from totals. Count unresolved blockers in completeness. Include `DISTINCT` records once resolved. Do not use `review_status == PENDING` as a universal exclusion: a pending Transfer with `NONE` is incomplete, while an explicitly marked valid Savings Transfer can count. A reviewed Transfer with `NONE` is intentionally ordinary.
+- **Monthly completeness:** Show distinct affected transaction count and counts by blocker; blocker counts can overlap. Explicit exclusions and confirmed duplicates are omitted but are not incomplete-data blockers.
+- **Historical category labels:** Group Needs/Wants/Savings by each Transaction's stored bucket snapshot. Show the current Subcategory name, including for archived categories; renames update descriptive labels but category moves/archival never rewrite historical bucket snapshots.
+- **Monthly report auditability:** Backend Decimal totals serialize as strings. Each summary and Subcategory amount must drill down to the exact eligible ledger transactions with a signed report contribution; Needs/Wants drilldowns include Refunds. Remaining has a reconciliation drilldown whose row contributions sum exactly to Remaining.
+- **Target configuration and reporting UX:** The monthly Reports screen defaults to latest transaction month (or current month for an empty ledger), uses calendar month navigation, shows actual/target/percentage-point variance, breakdowns, blockers, and drilldowns. Reports use current target settings and have no report-view write side effects.
+- **Monthly allocation donut:** Reuse the monthly report API and existing drilldowns. With non-negative Remaining, show Needs, Wants, Savings Contributions, and Remaining as shares of Income. With negative Remaining, show positive allocations as shares of allocations and an explicit over-Income amount. Any negative allocation component makes the chart unavailable rather than being clamped or converted to positive; incomplete reports are labeled partial.
+- **Synthetic examples:** Tests, fixtures, documentation, and UI examples use synthetic/generic financial descriptions, never real transaction descriptions observed during manual testing. The categorization regression uses `COFFEE SHOP 1234` and `ROUNDUP *COFFEE SHOP 1234`.
 
 # Final development philosophy
 

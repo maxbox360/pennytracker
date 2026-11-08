@@ -1,5 +1,17 @@
 from django.contrib import admin
-from .models import Account, ImportBatch, Subcategory, Transaction
+from .models import Account, BudgetTargetSettings, ImportBatch, Subcategory, Transaction
+
+
+@admin.register(BudgetTargetSettings)
+class BudgetTargetSettingsAdmin(admin.ModelAdmin):
+    list_display = ('needs_percent', 'wants_percent', 'savings_percent')
+    readonly_fields = ('id',)
+
+    def has_add_permission(self, request):
+        return not BudgetTargetSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(ImportBatch)
