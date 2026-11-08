@@ -63,6 +63,9 @@ class SubcategoryAdmin(admin.ModelAdmin):
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
+    def has_delete_permission(self, request, obj=None):
+        return False
+
     list_display = (
         'date',
         'raw_description',
