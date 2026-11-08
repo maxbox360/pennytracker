@@ -455,7 +455,7 @@ class TransactionViewSet(ModelViewSet):
                     transaction_record,
                     data={
                         key: request.data[key]
-                        for key in ('classification', 'subcategory', 'merchant', 'notes')
+                        for key in ('classification', 'savings_effect', 'subcategory', 'merchant', 'notes')
                         if key in request.data
                     },
                     partial=True,
