@@ -397,6 +397,11 @@ class Transaction(models.Model):
 
         classification_changed = previous is not None and previous['classification'] != self.classification
         subcategory_changed = previous is None or previous['subcategory_id'] != self.subcategory_id
+        assignment_unchanged = (
+            previous is not None
+            and not classification_changed
+            and not subcategory_changed
+        )
         if previous is not None and (
             classification_changed or subcategory_changed
         ) and self.categorized_by_rule_id == previous['categorized_by_rule_id']:
@@ -407,7 +412,17 @@ class Transaction(models.Model):
             changed_fields.add('categorization_rule_conflict')
         if self.subcategory_id:
             eligible_buckets = self.eligible_buckets(self.classification)
-            if not self.subcategory_matches_classification(self.subcategory, self.classification):
+            if assignment_unchanged:
+                if self.classification == TransactionClassification.OTHER_INFLOW:
+                    if self.budget_bucket:
+                        raise ValidationError({
+                            'budget_bucket': 'Other inflows cannot have a budget bucket snapshot.'
+                        })
+                elif self.budget_bucket not in eligible_buckets:
+                    raise ValidationError({
+                        'budget_bucket': 'A valid historical bucket snapshot is required for this subcategory.'
+                    })
+            elif not self.subcategory_matches_classification(self.subcategory, self.classification):
                 if classification_changed:
                     self.subcategory = None
                     self.budget_bucket = ''

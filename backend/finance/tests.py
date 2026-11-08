@@ -99,6 +99,43 @@ class TransactionModelTests(TestCase):
         transaction.save()
         self.assertEqual(transaction.budget_bucket, BudgetBucket.WANTS)
 
+    def test_unchanged_assignments_remain_editable_after_subcategory_bucket_moves(self):
+        subcategory = Subcategory.objects.create(name='Groceries', budget_bucket=BudgetBucket.NEEDS)
+        transaction = Transaction.objects.create(
+            account=self.account,
+            subcategory=subcategory,
+            date=date(2026, 1, 15),
+            raw_description='Market',
+            amount=Decimal('-42.50'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+        subcategory.budget_bucket = BudgetBucket.WANTS
+        subcategory.save()
+
+        transaction.refresh_from_db()
+        transaction.notes = 'Updated after category moved'
+        transaction.save()
+        self.assertEqual(transaction.budget_bucket, BudgetBucket.NEEDS)
+
+        savings = Subcategory.objects.create(name='Emergency Fund', budget_bucket=BudgetBucket.SAVINGS)
+        transfer = Transaction.objects.create(
+            account=self.account,
+            subcategory=savings,
+            date=date(2026, 1, 16),
+            raw_description='Savings transfer',
+            amount=Decimal('-100.00'),
+            classification=Transaction.Classification.TRANSFER,
+            savings_effect=SavingsEffect.CONTRIBUTION,
+        )
+        savings.budget_bucket = BudgetBucket.WANTS
+        savings.save()
+
+        transfer.refresh_from_db()
+        transfer.notes = 'Updated after category moved'
+        transfer.save()
+        self.assertEqual(transfer.budget_bucket, BudgetBucket.SAVINGS)
+        self.assertEqual(transfer.savings_effect, SavingsEffect.CONTRIBUTION)
+
     def test_classification_change_clears_invalid_subcategory_and_bucket(self):
         wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
         transaction = Transaction.objects.create(
@@ -264,6 +301,46 @@ class LedgerApiTests(APITestCase):
         self.assertEqual(response.data['classification'], 'EXPENSE')
         self.assertEqual(response.data['budget_bucket'], 'NEEDS')
         self.assertEqual(response.data['subcategory_name'], 'Groceries')
+
+    def test_same_subcategory_can_be_resubmitted_after_its_bucket_moves(self):
+        expense = Transaction.objects.create(
+            account=self.account,
+            subcategory=self.needs,
+            date=date(2026, 1, 15),
+            raw_description='Market',
+            amount=Decimal('-42.50'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+        self.needs.budget_bucket = BudgetBucket.WANTS
+        self.needs.save()
+        response = self.client.patch(
+            f'/api/transactions/{expense.pk}/',
+            {'subcategory': self.needs.pk},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['budget_bucket'], BudgetBucket.NEEDS)
+
+        savings = Subcategory.objects.create(name='Emergency Fund', budget_bucket=BudgetBucket.SAVINGS)
+        transfer = Transaction.objects.create(
+            account=self.account,
+            subcategory=savings,
+            date=date(2026, 1, 16),
+            raw_description='Savings transfer',
+            amount=Decimal('-100.00'),
+            classification=Transaction.Classification.TRANSFER,
+            savings_effect=SavingsEffect.CONTRIBUTION,
+        )
+        savings.budget_bucket = BudgetBucket.NEEDS
+        savings.save()
+        response = self.client.patch(
+            f'/api/transactions/{transfer.pk}/',
+            {'subcategory': savings.pk},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['budget_bucket'], BudgetBucket.SAVINGS)
+        self.assertEqual(response.data['savings_effect'], SavingsEffect.CONTRIBUTION)
 
     def test_unknown_classification_is_valid_without_a_subcategory(self):
         response = self.client.post(

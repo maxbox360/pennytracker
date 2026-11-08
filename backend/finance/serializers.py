@@ -327,8 +327,23 @@ class TransactionSerializer(serializers.ModelSerializer):
             'subcategory',
             self.instance.subcategory if self.instance else None,
         )
+        assignment_unchanged = (
+            self.instance is not None
+            and not classification_changed
+            and subcategory is not None
+            and subcategory.pk == self.instance.subcategory_id
+        )
         if subcategory:
-            eligible = Transaction.subcategory_matches_classification(subcategory, classification)
+            if assignment_unchanged:
+                eligible = (
+                    subcategory.scope == Subcategory.Scope.OTHER_INFLOW
+                    and self.instance.budget_bucket == ''
+                    if classification == TransactionClassification.OTHER_INFLOW
+                    else subcategory.scope == Subcategory.Scope.BUDGET
+                    and self.instance.budget_bucket in Transaction.eligible_buckets(classification)
+                )
+            else:
+                eligible = Transaction.subcategory_matches_classification(subcategory, classification)
             if not eligible and not (
                 classification_changed and not subcategory_was_supplied
             ):
@@ -349,7 +364,7 @@ class TransactionSerializer(serializers.ModelSerializer):
         if savings_effect != SavingsEffect.NONE:
             saved_bucket = (
                 self.instance.budget_bucket
-                if self.instance and not subcategory_was_supplied
+                if assignment_unchanged
                 else (subcategory.budget_bucket if subcategory else '')
             )
             if classification != TransactionClassification.TRANSFER:
