@@ -674,8 +674,11 @@ class TransactionViewSet(ModelViewSet):
                         raise ValidationError({'classification': 'Choose a valid classification.'})
                     for record in records:
                         record.classification = classification
+                        if classification != TransactionClassification.TRANSFER:
+                            record.savings_effect = Transaction.SavingsEffect.NONE
                         record.save(update_fields=(
                             'classification',
+                            'savings_effect',
                             'subcategory',
                             'budget_bucket',
                             'review_status',
