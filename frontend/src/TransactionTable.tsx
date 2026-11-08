@@ -248,6 +248,7 @@ export default function TransactionTable({ mode, reload }: Props) {
     setSelected([])
     setEditingId(null)
     setDraft(null)
+    setPage(1)
     setLocalReload((current) => current + 1)
   }
 
