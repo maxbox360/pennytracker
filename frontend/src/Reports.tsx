@@ -11,6 +11,7 @@ type AllocationValue = SummaryValue & {
 }
 type Summary = {
   income: SummaryValue
+  other_inflows: SummaryValue
   needs: AllocationValue
   wants: AllocationValue
   savings_contributions: AllocationValue
@@ -19,7 +20,7 @@ type Summary = {
   remaining: { amount: string }
 }
 type BreakdownRow = {
-  subcategory: number
+  subcategory: number | null
   subcategory_name: string
   amount: string
   transaction_count: number
@@ -44,6 +45,7 @@ type TrendPoint = {
   is_incomplete: boolean
   affected_transaction_count: number
   income: string
+  other_inflows: string
   needs: string
   wants: string
   savings_contributions: string
@@ -63,6 +65,7 @@ type ReportBase = {
   summary: Summary
   data_completeness: Completeness
   breakdown: Record<'NEEDS' | 'WANTS' | 'SAVINGS', BreakdownRow[]>
+  other_inflows_breakdown: BreakdownRow[]
 }
 type HistoricalReport = ReportBase & {
   monthly_series: TrendPoint[]
@@ -98,7 +101,7 @@ type DrillRow = {
   contribution: string
 }
 type Drilldown = { count: number; next: number | null; previous: number | null; results: DrillRow[] }
-type DrillSelection = { metric: string; title: string; subcategory?: number }
+type DrillSelection = { metric: string; title: string; subcategory?: number | 'uncategorized' }
 type CategoryTrend = {
   subcategory: number
   subcategory_name: string
@@ -133,6 +136,7 @@ const blockerLabels: Record<string, string> = {
 const bucketLabels = { NEEDS: 'Needs', WANTS: 'Wants', SAVINGS: 'Savings' } as const
 const metricLabels: Record<keyof Summary, string> = {
   income: 'Income',
+  other_inflows: 'Other Inflows',
   needs: 'Needs',
   wants: 'Wants',
   savings_contributions: 'Savings Contributions',
@@ -150,6 +154,7 @@ const dollarTableLines: ChartLine[] = [
   ...dollarLines,
   { key: 'savings_withdrawals', label: 'Savings Withdrawals', color: 'var(--chart-remaining)' },
   { key: 'net_savings_activity', label: 'Net Savings Activity', color: 'var(--chart-savings)' },
+  { key: 'other_inflows', label: 'Other Inflows', color: 'var(--chart-remaining)' },
   { key: 'remaining', label: 'Remaining / Unallocated', color: 'var(--muted)' },
 ]
 const percentageLines: ChartLine[] = [
@@ -174,6 +179,7 @@ function periodStatus(completeness: Completeness, transactionCount: number, summ
   if (!transactionCount) return 'No transactions'
   const amounts = [
     summary.income.amount,
+    summary.other_inflows.amount,
     summary.needs.amount,
     summary.wants.amount,
     summary.savings_contributions.amount,
@@ -191,6 +197,7 @@ function SummaryTable({
 }) {
   const values: (keyof Summary)[] = [
     'income',
+    'other_inflows',
     'needs',
     'wants',
     'savings_contributions',
@@ -243,10 +250,12 @@ function CompletenessNotice({ completeness }: { completeness: Completeness }) {
 
 function Breakdown({
   breakdown,
+  otherInflows,
   onSelect,
 }: {
   breakdown: ReportBase['breakdown']
-  onSelect: (metric: string, title: string, subcategory: number) => void
+  otherInflows: ReportBase['other_inflows_breakdown']
+  onSelect: (metric: string, title: string, subcategory: number | null) => void
 }) {
   return (
     <div className="report-breakdowns">
@@ -275,6 +284,25 @@ function Breakdown({
           ) : <p className="muted">No eligible transactions.</p>}
         </section>
       ))}
+      <section>
+        <h3>Other Inflows</h3>
+        {otherInflows.length ? (
+          <table>
+            <thead><tr><th>Subcategory</th><th>Amount</th><th>Transactions</th></tr></thead>
+            <tbody>{otherInflows.map((row) => (
+              <tr key={row.subcategory ?? 'uncategorized'}>
+                <th><button
+                  className="report-link"
+                  type="button"
+                  onClick={() => onSelect('other_inflows', `${row.subcategory_name} · Other Inflows`, row.subcategory)}
+                >{row.subcategory_name}</button></th>
+                <td className="amount-cell">{formatAmount(row.amount)}</td>
+                <td>{row.transaction_count}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        ) : <p className="muted">No eligible transactions.</p>}
+      </section>
     </div>
   )
 }
@@ -450,6 +478,7 @@ function summaryPoint(point: TrendPoint): ChartPoint {
     affected_transaction_count: point.affected_transaction_count,
     values: {
       income: point.income,
+      other_inflows: point.other_inflows,
       needs: point.needs,
       wants: point.wants,
       savings_contributions: point.savings_contributions,
@@ -586,8 +615,12 @@ export default function Reports({ reload }: { reload: number }) {
     }
   }
 
-  function openDrill(metric: string, title: string, subcategory?: number) {
-    setDrillSelection({ metric, title, subcategory })
+  function openDrill(metric: string, title: string, subcategory?: number | null) {
+    setDrillSelection({
+      metric,
+      title,
+      ...(subcategory === null ? { subcategory: 'uncategorized' } : subcategory !== undefined ? { subcategory } : {}),
+    })
     setDrillPage(1)
     setDrilldown(null)
   }
@@ -621,8 +654,8 @@ export default function Reports({ reload }: { reload: number }) {
     },
   })) || [], [categoryTrend])
 
-  function selectCategory(metric: string, title: string, id: number) {
-    setCategoryTrendId(metric === 'net_savings_activity' ? null : id)
+  function selectCategory(metric: string, title: string, id: number | null) {
+    setCategoryTrendId(metric === 'net_savings_activity' || metric === 'other_inflows' || id === null ? null : id)
     openDrill(metric, title, id)
   }
 
@@ -702,7 +735,7 @@ export default function Reports({ reload }: { reload: number }) {
             <section className="historical-table-section">
               <h3>Calendar years</h3>
               <div className="table-scroll"><table>
-                <thead><tr><th>Year</th><th>Income</th><th>Needs</th><th>Wants</th><th>Savings Contributions</th><th>Savings Withdrawals</th><th>Net Savings</th><th>Remaining</th><th>Data</th></tr></thead>
+                <thead><tr><th>Year</th><th>Income</th><th>Other Inflows</th><th>Needs</th><th>Wants</th><th>Savings Contributions</th><th>Savings Withdrawals</th><th>Net Savings</th><th>Remaining</th><th>Data</th></tr></thead>
                 <tbody>{report.years.map((item) => (
                   <tr key={item.year} className={item.data_completeness.is_incomplete ? 'historical-row--incomplete' : undefined}>
                     <th><button className="report-link" type="button" onClick={() => {
@@ -711,6 +744,7 @@ export default function Reports({ reload }: { reload: number }) {
                       setDrillSelection(null)
                     }}>{item.year}</button></th>
                     <td className="amount-cell">{formatAmount(item.summary.income.amount)}</td>
+                    <td className="amount-cell">{formatAmount(item.summary.other_inflows.amount)}</td>
                     <td className="amount-cell">{formatAmount(item.summary.needs.amount)}</td>
                     <td className="amount-cell">{formatAmount(item.summary.wants.amount)}</td>
                     <td className="amount-cell">{formatAmount(item.summary.savings_contributions.amount)}</td>
@@ -728,7 +762,7 @@ export default function Reports({ reload }: { reload: number }) {
             <section className="historical-table-section">
               <h3>{report.period.year} calendar months</h3>
               <div className="table-scroll"><table>
-                <thead><tr><th>Month</th><th>Income</th><th>Needs</th><th>Wants</th><th>Savings Contributions</th><th>Savings Withdrawals</th><th>Net Savings</th><th>Remaining</th><th>Data</th></tr></thead>
+                <thead><tr><th>Month</th><th>Income</th><th>Other Inflows</th><th>Needs</th><th>Wants</th><th>Savings Contributions</th><th>Savings Withdrawals</th><th>Net Savings</th><th>Remaining</th><th>Data</th></tr></thead>
                 <tbody>{report.months.map((item) => (
                   <tr key={item.period.month} className={item.data_completeness.is_incomplete ? 'historical-row--incomplete' : undefined}>
                     <th><button className="report-link" type="button" onClick={() => {
@@ -738,6 +772,7 @@ export default function Reports({ reload }: { reload: number }) {
                       setDrillSelection(null)
                     }}>{formatMonth(item.period.year, item.period.month)}</button></th>
                     <td className="amount-cell">{formatAmount(item.summary.income.amount)}</td>
+                    <td className="amount-cell">{formatAmount(item.summary.other_inflows.amount)}</td>
                     <td className="amount-cell">{formatAmount(item.summary.needs.amount)}</td>
                     <td className="amount-cell">{formatAmount(item.summary.wants.amount)}</td>
                     <td className="amount-cell">{formatAmount(item.summary.savings_contributions.amount)}</td>
@@ -774,6 +809,7 @@ export default function Reports({ reload }: { reload: number }) {
           {breakdown && (
             <Breakdown
               breakdown={breakdown}
+              otherInflows={report.other_inflows_breakdown}
               onSelect={(metric, title, id) => selectCategory(metric, title, id)}
             />
           )}

@@ -11,6 +11,7 @@ from .models import (
     RuleMatchType,
     SavingsEffect,
     Subcategory,
+    SubcategoryScope,
     Transaction,
     TransactionClassification,
 )
@@ -70,28 +71,47 @@ class BudgetTargetSettingsSerializer(serializers.ModelSerializer):
 class SubcategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Subcategory
-        fields = ('id', 'name', 'budget_bucket', 'is_active')
+        fields = ('id', 'name', 'scope', 'budget_bucket', 'is_active')
 
     def validate_name(self, value):
-        normalized_name = value.strip().casefold()
-        duplicates = Subcategory.objects.exclude(pk=self.instance.pk) if self.instance else Subcategory.objects.all()
+        return value.strip()
+
+    def validate(self, attrs):
+        scope = attrs.get(
+            'scope',
+            self.instance.scope if self.instance else SubcategoryScope.BUDGET,
+        )
+        bucket = attrs.get(
+            'budget_bucket',
+            self.instance.budget_bucket if self.instance else None,
+        )
+        if scope == SubcategoryScope.BUDGET and bucket not in BudgetBucket.values:
+            raise serializers.ValidationError({
+                'budget_bucket': 'Choose Needs, Wants, or Savings for a budget subcategory.'
+            })
+        if scope == SubcategoryScope.OTHER_INFLOW and bucket is not None:
+            raise serializers.ValidationError({
+                'budget_bucket': 'Other Inflow subcategories cannot have a budget bucket.'
+            })
+        if scope not in SubcategoryScope.values:
+            raise serializers.ValidationError({'scope': 'Choose a valid subcategory scope.'})
+
+        name = attrs.get('name', self.instance.name if self.instance else '').strip().casefold()
+        duplicates = Subcategory.objects.filter(scope=scope)
+        if self.instance:
+            duplicates = duplicates.exclude(pk=self.instance.pk)
         existing = next(
-            (subcategory for subcategory in duplicates if subcategory.name.strip().casefold() == normalized_name),
+            (item for item in duplicates if item.name.strip().casefold() == name),
             None,
         )
         if existing:
-            if not existing.is_active:
-                message = (
-                    f'The subcategory “{existing.name}” is archived. '
-                    'Reactivate it from Categories instead of creating a duplicate.'
-                )
-            else:
-                message = (
-                    f'An active subcategory named “{existing.name}” already exists. '
-                    'Select it from the subcategory list instead of creating a duplicate.'
-                )
-            raise serializers.ValidationError(message)
-        return value.strip()
+            message = (
+                f'The subcategory “{existing.name}” is archived. Reactivate it instead of creating a duplicate.'
+                if not existing.is_active
+                else f'An active subcategory named “{existing.name}” already exists.'
+            )
+            raise serializers.ValidationError({'name': message})
+        return attrs
 
 
 class CategorizationRuleSerializer(serializers.ModelSerializer):
@@ -155,8 +175,8 @@ class CategorizationRuleSerializer(serializers.ModelSerializer):
                 self.instance is not None
                 and self.instance.subcategory_id == subcategory.pk
             )
-            target_is_usable = (
-                subcategory.is_active
+            target_is_usable = subcategory.is_active and (
+                subcategory.scope == SubcategoryScope.BUDGET
                 and subcategory.budget_bucket in (BudgetBucket.NEEDS, BudgetBucket.WANTS)
             )
             if not target_unchanged and not subcategory.is_active:
@@ -308,13 +328,12 @@ class TransactionSerializer(serializers.ModelSerializer):
             self.instance.subcategory if self.instance else None,
         )
         if subcategory:
-            eligible = Transaction.eligible_buckets(classification)
-            if subcategory.budget_bucket not in eligible and not (
+            eligible = Transaction.subcategory_matches_classification(subcategory, classification)
+            if not eligible and not (
                 classification_changed and not subcategory_was_supplied
             ):
                 raise serializers.ValidationError({
-                    'subcategory': 'Subcategories must match the transaction classification: '
-                    'Needs/Wants for expenses and refunds, Savings for transfers.'
+                    'subcategory': 'Choose a subcategory compatible with the transaction classification.'
                 })
             if self.instance is None or (
                 subcategory_was_supplied and self.instance.subcategory_id != subcategory.pk

@@ -102,6 +102,14 @@ Implement one milestone at a time; keep the application runnable and verify each
 - Additional CSV formats, import profiles, statement parsing, and automatic bill matching.
 - Historical spreadsheet migration and backup/restore.
 
+## Post-core accounting refinement — Other Inflows (complete)
+
+- Added `OTHER_INFLOW` for genuinely new money that is not normal budgeting Income, a Refund, or a Transfer. It is signed-summed as a separate Month/Year/All-Time report line with transaction drilldowns.
+- Kept Needs/Wants/Savings as the only budget buckets. Added a separate Other Inflow scope for optional descriptive Subcategories; existing Subcategories migrate as budget-scoped without changing bucket snapshots.
+- Kept Other Inflows out of Income allocation percentages, Remaining / Unallocated, and the monthly allocation donut. UNKNOWN incoming transactions remain unresolved until explicitly classified.
+- Kept Refund and Transfer accounting unchanged. Categorization rules remain Expense-only; Other Inflow rules, P2P inference, Net Cash Flow, transfer pairing, and gambling analytics remain deferred.
+- Added an Other Inflows group to Categories and classification-aware optional Subcategory assignment in the transaction editor.
+
 ## Later, only when useful
 
 - Debt records and balance snapshots, including optional extra-paydown goals.

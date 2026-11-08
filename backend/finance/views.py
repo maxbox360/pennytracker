@@ -41,6 +41,7 @@ from .models import (
     ImportBatch,
     ReviewStatus,
     Subcategory,
+    SubcategoryScope,
     Transaction,
     TransactionClassification,
 )
@@ -147,9 +148,12 @@ def historical_drilldown(request, scope):
     subcategory_value = request.query_params.get('subcategory')
     subcategory_id = None
     if subcategory_value is not None:
-        if not subcategory_value.isdecimal():
-            raise ValidationError({'subcategory': 'Use a subcategory ID.'})
-        subcategory_id = int(subcategory_value)
+        if subcategory_value == 'uncategorized':
+            subcategory_id = 'uncategorized'
+        elif subcategory_value.isdecimal():
+            subcategory_id = int(subcategory_value)
+        else:
+            raise ValidationError({'subcategory': 'Use a subcategory ID or "uncategorized".'})
     try:
         rows = drilldown_queryset(start, end, metric, subcategory_id).values(
             'id',
@@ -236,7 +240,8 @@ class SubcategoryViewSet(ModelViewSet):
         if not names:
             raise ValidationError({'names': 'Enter at least one subcategory name.'})
 
-        existing = list(Subcategory.objects.all())
+        scope = request.data.get('scope', SubcategoryScope.BUDGET)
+        existing = list(Subcategory.objects.filter(scope=scope))
         active = {item.name.strip().casefold(): item for item in existing if item.is_active}
         archived = {item.name.strip().casefold(): item for item in existing if not item.is_active}
         seen = set()
@@ -260,7 +265,8 @@ class SubcategoryViewSet(ModelViewSet):
 
             serializer = SubcategorySerializer(data={
                 'name': name,
-                'budget_bucket': request.data.get('budget_bucket'),
+                'scope': scope,
+                'budget_bucket': request.data.get('budget_bucket') if scope == SubcategoryScope.BUDGET else None,
             })
             if not serializer.is_valid():
                 messages = [
@@ -406,7 +412,10 @@ class TransactionViewSet(ModelViewSet):
     def create_subcategory_and_assign(self, request, pk=None):
         subcategory_serializer = SubcategorySerializer(data={
             'name': request.data.get('name', ''),
-            'budget_bucket': request.data.get('budget_bucket', ''),
+            'scope': request.data.get('scope', SubcategoryScope.BUDGET),
+            'budget_bucket': request.data.get('budget_bucket') if request.data.get(
+                'scope', SubcategoryScope.BUDGET
+            ) == SubcategoryScope.BUDGET else None,
         })
         if not subcategory_serializer.is_valid():
             return Response(subcategory_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -679,7 +688,10 @@ class TransactionViewSet(ModelViewSet):
                     except Subcategory.DoesNotExist as error:
                         raise ValidationError({'subcategory': 'Select an active subcategory.'}) from error
                     for record in records:
-                        if subcategory.budget_bucket not in Transaction.eligible_buckets(record.classification):
+                        if not Transaction.subcategory_matches_classification(
+                            subcategory,
+                            record.classification,
+                        ):
                             raise ValidationError({
                                 'subcategory': f'The subcategory is not valid for transaction {record.pk}.'
                             })

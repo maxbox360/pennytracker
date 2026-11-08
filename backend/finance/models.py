@@ -12,6 +12,11 @@ class BudgetBucket(models.TextChoices):
     SAVINGS = 'SAVINGS', 'Savings'
 
 
+class SubcategoryScope(models.TextChoices):
+    BUDGET = 'BUDGET', 'Budget'
+    OTHER_INFLOW = 'OTHER_INFLOW', 'Other inflows'
+
+
 class TransactionClassification(models.TextChoices):
     UNKNOWN = 'UNKNOWN', 'Unknown'
     EXPENSE = 'EXPENSE', 'Expense'
@@ -19,6 +24,7 @@ class TransactionClassification(models.TextChoices):
     REFUND = 'REFUND', 'Refund'
     TRANSFER = 'TRANSFER', 'Transfer'
     EXCLUDED = 'EXCLUDED', 'Excluded'
+    OTHER_INFLOW = 'OTHER_INFLOW', 'Other inflow'
 
 
 class ReviewStatus(models.TextChoices):
@@ -48,6 +54,10 @@ class RuleMatchField(models.TextChoices):
 class RuleMatchType(models.TextChoices):
     CONTAINS = 'CONTAINS', 'Contains'
     EQUALS = 'EQUALS', 'Equals'
+
+
+class RuleClassification(models.TextChoices):
+    EXPENSE = TransactionClassification.EXPENSE, 'Expense'
 
 
 class Account(models.Model):
@@ -99,19 +109,26 @@ class ImportBatch(models.Model):
 
 
 class Subcategory(models.Model):
+    Scope = SubcategoryScope
+
     name = models.CharField(max_length=100)
-    budget_bucket = models.CharField(max_length=10, choices=BudgetBucket.choices)
+    scope = models.CharField(max_length=12, choices=Scope.choices, default=Scope.BUDGET)
+    budget_bucket = models.CharField(max_length=10, choices=BudgetBucket.choices, null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:
         ordering = ['budget_bucket', 'name', 'id']
         constraints = [
             models.CheckConstraint(
-                condition=Q(budget_bucket__in=BudgetBucket.values),
-                name='valid_subcategory_budget_bucket',
+                condition=(
+                    Q(scope=SubcategoryScope.BUDGET, budget_bucket__in=BudgetBucket.values)
+                    | Q(scope=SubcategoryScope.OTHER_INFLOW, budget_bucket__isnull=True)
+                ),
+                name='valid_subcategory_scope_bucket',
             ),
             models.UniqueConstraint(
                 Lower(Trim('name')),
+                'scope',
                 condition=Q(is_active=True),
                 name='unique_active_subcategory_name_ci',
             ),
@@ -136,8 +153,8 @@ class CategorizationRule(models.Model):
     match_value = models.CharField(max_length=200)
     classification = models.CharField(
         max_length=10,
-        choices=TransactionClassification.choices,
-        default=TransactionClassification.EXPENSE,
+        choices=RuleClassification.choices,
+        default=RuleClassification.EXPENSE,
     )
     subcategory = models.ForeignKey(
         Subcategory,
@@ -160,7 +177,7 @@ class CategorizationRule(models.Model):
                 name='valid_rule_match_type',
             ),
             models.CheckConstraint(
-                condition=Q(classification__in=TransactionClassification.values),
+                condition=Q(classification__in=RuleClassification.values),
                 name='valid_rule_classification',
             ),
         ]
@@ -233,7 +250,7 @@ class Transaction(models.Model):
     )
     source_row = models.PositiveIntegerField(null=True, blank=True)
     classification = models.CharField(
-        max_length=10,
+        max_length=20,
         choices=Classification.choices,
         default=Classification.UNKNOWN,
     )
@@ -282,6 +299,11 @@ class Transaction(models.Model):
                 name='valid_transaction_classification',
             ),
             models.CheckConstraint(
+                condition=~Q(classification=TransactionClassification.OTHER_INFLOW)
+                | Q(budget_bucket=''),
+                name='other_inflow_has_no_budget_bucket',
+            ),
+            models.CheckConstraint(
                 condition=Q(review_status__in=ReviewStatus.values),
                 name='valid_transaction_review_status',
             ),
@@ -315,6 +337,15 @@ class Transaction(models.Model):
         if classification == TransactionClassification.TRANSFER:
             return {BudgetBucket.SAVINGS}
         return set()
+
+    @staticmethod
+    def subcategory_matches_classification(subcategory, classification):
+        if classification == TransactionClassification.OTHER_INFLOW:
+            return subcategory.scope == Subcategory.Scope.OTHER_INFLOW and subcategory.budget_bucket is None
+        return (
+            subcategory.scope == Subcategory.Scope.BUDGET
+            and subcategory.budget_bucket in Transaction.eligible_buckets(classification)
+        )
 
     def review_blockers(self):
         if self.duplicate_resolution == DuplicateResolution.CONFIRMED_DUPLICATE:
@@ -376,7 +407,7 @@ class Transaction(models.Model):
             changed_fields.add('categorization_rule_conflict')
         if self.subcategory_id:
             eligible_buckets = self.eligible_buckets(self.classification)
-            if self.subcategory.budget_bucket not in eligible_buckets:
+            if not self.subcategory_matches_classification(self.subcategory, self.classification):
                 if classification_changed:
                     self.subcategory = None
                     self.budget_bucket = ''
@@ -388,8 +419,11 @@ class Transaction(models.Model):
             elif subcategory_changed:
                 if not self.subcategory.is_active:
                     raise ValidationError({'subcategory': 'New assignments must use an active subcategory.'})
-                self.budget_bucket = self.subcategory.budget_bucket
+                self.budget_bucket = self.subcategory.budget_bucket or ''
                 changed_fields.add('budget_bucket')
+            elif self.classification == TransactionClassification.OTHER_INFLOW:
+                if self.budget_bucket:
+                    raise ValidationError({'budget_bucket': 'Other inflows cannot have a budget bucket snapshot.'})
             elif self.budget_bucket not in eligible_buckets:
                 raise ValidationError({
                     'budget_bucket': 'A valid historical bucket snapshot is required for this subcategory.'

@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { apiFetch } from './api'
 
-type Classification = 'UNKNOWN' | 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER' | 'EXCLUDED'
+type Classification = 'UNKNOWN' | 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER' | 'EXCLUDED' | 'OTHER_INFLOW'
 type Bucket = 'NEEDS' | 'WANTS' | 'SAVINGS'
+type Scope = 'BUDGET' | 'OTHER_INFLOW'
 type SavingsEffect = 'NONE' | 'CONTRIBUTION' | 'WITHDRAWAL'
-type Subcategory = { id: number; name: string; budget_bucket: Bucket; is_active: boolean }
+type Subcategory = { id: number; name: string; scope: Scope; budget_bucket: Bucket | null; is_active: boolean }
 type Account = { id: number; name: string; is_active: boolean }
 type Candidate = {
   id: number
@@ -62,6 +63,7 @@ const classifications: Classification[] = [
   'REFUND',
   'TRANSFER',
   'EXCLUDED',
+  'OTHER_INFLOW',
 ]
 const classificationLabels: Record<Classification, string> = {
   UNKNOWN: 'Unknown',
@@ -70,6 +72,7 @@ const classificationLabels: Record<Classification, string> = {
   REFUND: 'Refund',
   TRANSFER: 'Transfer',
   EXCLUDED: 'Excluded',
+  OTHER_INFLOW: 'Other inflow',
 }
 const bucketLabels: Record<Bucket, string> = { NEEDS: 'Needs', WANTS: 'Wants', SAVINGS: 'Savings' }
 const reviewStatusLabels: Record<Transaction['review_status'], string> = {
@@ -104,6 +107,14 @@ function eligibleBuckets(classification: Classification): Bucket[] {
   if (classification === 'EXPENSE' || classification === 'REFUND') return ['NEEDS', 'WANTS']
   if (classification === 'TRANSFER') return ['SAVINGS']
   return []
+}
+
+function acceptsSubcategory(classification: Classification, subcategory: Subcategory) {
+  return classification === 'OTHER_INFLOW'
+    ? subcategory.scope === 'OTHER_INFLOW' && subcategory.budget_bucket === null
+    : subcategory.scope === 'BUDGET'
+      && subcategory.budget_bucket !== null
+      && acceptsBucket(classification, subcategory.budget_bucket)
 }
 
 export default function TransactionTable({ mode, reload }: Props) {
@@ -354,13 +365,18 @@ export default function TransactionTable({ mode, reload }: Props) {
   async function createSubcategory(
     id: number,
     name: string,
-    budget_bucket: Bucket,
+    budget_bucket: Bucket | null,
     classification: Classification,
   ) {
     const response = await apiFetch(`/api/transactions/${id}/create-subcategory-and-assign/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, budget_bucket, classification }),
+      body: JSON.stringify({
+        name,
+        scope: classification === 'OTHER_INFLOW' ? 'OTHER_INFLOW' : 'BUDGET',
+        budget_bucket,
+        classification,
+      }),
     })
     const result = await response.json()
     if (!response.ok) throw new Error(errorText(result))
@@ -493,7 +509,9 @@ export default function TransactionTable({ mode, reload }: Props) {
               <option value="">Choose…</option>
               {subcategories.map((subcategory) => (
                 <option key={subcategory.id} value={subcategory.id}>
-                  {subcategory.name} · {bucketLabels[subcategory.budget_bucket]}
+                  {subcategory.name} · {subcategory.budget_bucket
+                    ? bucketLabels[subcategory.budget_bucket]
+                    : 'Other Inflows'}
                 </option>
               ))}
             </select>
@@ -652,7 +670,7 @@ type RowProps = {
   onCreateSubcategory: (
     id: number,
     name: string,
-    bucket: Bucket,
+    bucket: Bucket | null,
     classification: Classification,
   ) => Promise<Subcategory>
   reviewStatusLabel: string
@@ -668,7 +686,7 @@ function FragmentRow(props: RowProps) {
   const [createError, setCreateError] = useState('')
   const [creating, setCreating] = useState(false)
   const eligibleSubcategories = draft
-    ? subcategories.filter((subcategory) => acceptsBucket(draft.classification, subcategory.budget_bucket))
+    ? subcategories.filter((subcategory) => acceptsSubcategory(draft.classification, subcategory))
     : []
   const assignableBuckets = draft ? eligibleBuckets(draft.classification) : []
 
@@ -738,7 +756,7 @@ function FragmentRow(props: RowProps) {
                       ...draft,
                       classification,
                       savings_effect: classification === 'TRANSFER' ? draft.savings_effect : 'NONE',
-                      subcategory: nextSubcategory && acceptsBucket(classification, nextSubcategory.budget_bucket)
+                      subcategory: nextSubcategory && acceptsSubcategory(classification, nextSubcategory)
                         ? draft.subcategory
                         : '',
                       rememberRule: false,
@@ -766,7 +784,9 @@ function FragmentRow(props: RowProps) {
                   <option value="">No subcategory</option>
                   {eligibleSubcategories.map((subcategory) => (
                     <option key={subcategory.id} value={subcategory.id}>
-                      {subcategory.name} · {bucketLabels[subcategory.budget_bucket]}
+                      {subcategory.name} · {subcategory.budget_bucket
+                        ? bucketLabels[subcategory.budget_bucket]
+                        : 'Other Inflows'}
                     </option>
                   ))}
                 </select>
@@ -787,7 +807,7 @@ function FragmentRow(props: RowProps) {
                   </select>
                 </label>
               )}
-              {mode === 'review' && assignableBuckets.length > 0 && (
+              {mode === 'review' && (assignableBuckets.length > 0 || draft.classification === 'OTHER_INFLOW') && (
                 <details className="inline-category-create">
                   <summary>+ Create new subcategory</summary>
                   <div className="inline-category-fields">
@@ -802,7 +822,7 @@ function FragmentRow(props: RowProps) {
                         onChange={(event) => setCreateName(event.target.value)}
                       />
                     </label>
-                    <label>
+                    {draft.classification !== 'OTHER_INFLOW' && <label>
                       Bucket
                       <select
                         value={assignableBuckets.includes(createBucket) ? createBucket : assignableBuckets[0]}
@@ -812,7 +832,7 @@ function FragmentRow(props: RowProps) {
                           <option key={value} value={value}>{bucketLabels[value]}</option>
                         ))}
                       </select>
-                    </label>
+                    </label>}
                     <button
                       className="secondary-button"
                       type="button"
@@ -821,9 +841,11 @@ function FragmentRow(props: RowProps) {
                         setCreating(true)
                         setCreateError('')
                         try {
-                          const validBucket = assignableBuckets.includes(createBucket)
-                            ? createBucket
-                            : assignableBuckets[0]
+                          const validBucket = draft.classification === 'OTHER_INFLOW'
+                            ? null
+                            : assignableBuckets.includes(createBucket)
+                              ? createBucket
+                              : assignableBuckets[0]
                           await props.onCreateSubcategory(
                             item.id,
                             createName,

@@ -72,6 +72,12 @@ def _contribution_expression(metric):
             default=Value(ZERO),
             output_field=MONEY_FIELD,
         )
+    if metric == 'other_inflows':
+        return Case(
+            When(classification=TransactionClassification.OTHER_INFLOW, then=F('amount')),
+            default=Value(ZERO),
+            output_field=MONEY_FIELD,
+        )
     if metric in ('needs', 'wants'):
         bucket = BudgetBucket.NEEDS if metric == 'needs' else BudgetBucket.WANTS
         return Case(
@@ -140,6 +146,8 @@ def _sum_metric(metric):
 def _count_metric(metric):
     if metric == 'income':
         condition = Q(classification=TransactionClassification.INCOME)
+    elif metric == 'other_inflows':
+        condition = Q(classification=TransactionClassification.OTHER_INFLOW)
     elif metric in ('needs', 'wants'):
         condition = _expense_condition(BudgetBucket.NEEDS if metric == 'needs' else BudgetBucket.WANTS)
     elif metric == 'savings_contributions':
@@ -226,6 +234,7 @@ def _period_data(start=None, end=None):
 def _aggregate_totals(transactions):
     metrics = (
         'income',
+        'other_inflows',
         'needs',
         'wants',
         'savings_contributions',
@@ -243,6 +252,7 @@ def _aggregate_totals(transactions):
 
 def _complete_summary(raw, targets):
     income = raw.get('income') or ZERO
+    other_inflows = raw.get('other_inflows') or ZERO
     needs = raw.get('needs') or ZERO
     wants = raw.get('wants') or ZERO
     contributions = raw.get('savings_contributions') or ZERO
@@ -280,6 +290,7 @@ def _complete_summary(raw, targets):
 
     return {
         'income': value('income', income),
+        'other_inflows': value('other_inflows', other_inflows),
         'needs': value('needs', needs, True),
         'wants': value('wants', wants, True),
         'savings_contributions': value('savings_contributions', contributions, True),
@@ -387,6 +398,33 @@ def _breakdown(transactions, ranked=False):
     return result
 
 
+def _other_inflow_breakdown(transactions, ranked=False):
+    rows = list(
+        _eligible_transactions(transactions)
+        .filter(classification=TransactionClassification.OTHER_INFLOW)
+        .values('subcategory_id', 'subcategory__name')
+        .annotate(
+            total=Coalesce(
+                Sum('amount', output_field=MONEY_FIELD),
+                Value(ZERO, output_field=MONEY_FIELD),
+                output_field=MONEY_FIELD,
+            ),
+            transaction_count=Count('pk'),
+        )
+    )
+    rows.sort(key=lambda row: (
+        -row['total'] if ranked else Decimal('0'),
+        (row['subcategory__name'] or 'Uncategorized').casefold(),
+        row['subcategory_id'] or 0,
+    ))
+    return [{
+        'subcategory': row['subcategory_id'],
+        'subcategory_name': row['subcategory__name'] or 'Uncategorized',
+        'amount': money(row['total']),
+        'transaction_count': row['transaction_count'],
+    } for row in rows]
+
+
 def _report(start, end, targets, transactions=None, *, include_breakdown=True, ranked=False):
     transactions = transactions if transactions is not None else _period_data(start, end)
     raw = _aggregate_totals(transactions)
@@ -399,6 +437,10 @@ def _report(start, end, targets, transactions=None, *, include_breakdown=True, r
     }
     if include_breakdown:
         report['breakdown'] = _breakdown(transactions, ranked=ranked)
+        report['other_inflows_breakdown'] = _other_inflow_breakdown(
+            transactions,
+            ranked=ranked,
+        )
     return report
 
 
@@ -426,6 +468,7 @@ def _grouped_values(transactions, grain):
         grouped = grouped.values('_year', '_month')
     metric_names = (
         'income',
+        'other_inflows',
         'needs',
         'wants',
         'savings_contributions',
@@ -482,6 +525,7 @@ def _period_map_rows(transactions, grain):
 def _raw_from_group(row):
     names = (
         'income',
+        'other_inflows',
         'needs',
         'wants',
         'savings_contributions',
@@ -569,6 +613,7 @@ def _trend_series(months, targets):
         'is_incomplete': item['data_completeness']['is_incomplete'],
         'affected_transaction_count': item['data_completeness']['affected_transaction_count'],
         'income': item['summary']['income']['amount'],
+        'other_inflows': item['summary']['other_inflows']['amount'],
         'needs': item['summary']['needs']['amount'],
         'wants': item['summary']['wants']['amount'],
         'savings_contributions': item['summary']['savings_contributions']['amount'],
@@ -741,6 +786,7 @@ def drilldown_queryset(start, end, metric, subcategory_id=None):
     transactions = _eligible_transactions(_period_data(start, end))
     conditions = {
         'income': Q(classification=TransactionClassification.INCOME),
+        'other_inflows': Q(classification=TransactionClassification.OTHER_INFLOW),
         'needs': _expense_condition(BudgetBucket.NEEDS),
         'wants': _expense_condition(BudgetBucket.WANTS),
         'savings_contributions': Q(
@@ -767,7 +813,9 @@ def drilldown_queryset(start, end, metric, subcategory_id=None):
     if metric not in conditions:
         raise ValueError('Choose a valid report metric.')
     transactions = transactions.filter(conditions[metric])
-    if subcategory_id is not None:
+    if subcategory_id == 'uncategorized':
+        transactions = transactions.filter(subcategory__isnull=True)
+    elif subcategory_id is not None:
         transactions = transactions.filter(subcategory_id=subcategory_id)
     return (
         transactions

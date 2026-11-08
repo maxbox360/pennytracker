@@ -6,8 +6,10 @@ from decimal import Decimal
 from django.test import Client, TestCase
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.test import TransactionTestCase
 from rest_framework.test import APITestCase
 
 from .categorization_rules import (
@@ -44,6 +46,7 @@ from .models import (
     ImportBatch,
     ReviewStatus,
     SavingsEffect,
+    SubcategoryScope,
     RuleMatchField,
     RuleMatchType,
     Subcategory,
@@ -115,6 +118,41 @@ class TransactionModelTests(TestCase):
         self.assertEqual(transaction.budget_bucket, '')
         self.assertEqual(transaction.review_status, ReviewStatus.NOT_REQUIRED)
 
+    def test_other_inflow_subcategory_has_no_budget_snapshot_and_is_classification_scoped(self):
+        other = Subcategory.objects.create(
+            name='Gifts',
+            scope=SubcategoryScope.OTHER_INFLOW,
+            budget_bucket=None,
+        )
+        incoming = Transaction.objects.create(
+            account=self.account,
+            subcategory=other,
+            date=date(2026, 1, 15),
+            raw_description='Synthetic birthday gift',
+            amount=Decimal('50.00'),
+            classification=Transaction.Classification.OTHER_INFLOW,
+        )
+        self.assertEqual(incoming.budget_bucket, '')
+        self.assertEqual(incoming.review_blockers(), [])
+
+        incoming.classification = Transaction.Classification.EXPENSE
+        incoming.save(update_fields=('classification',))
+        incoming.refresh_from_db()
+        self.assertIsNone(incoming.subcategory)
+        self.assertEqual(incoming.budget_bucket, '')
+
+        budget = Subcategory.objects.create(name='Groceries', budget_bucket=BudgetBucket.NEEDS)
+        invalid = Transaction(
+            account=self.account,
+            subcategory=budget,
+            date=date(2026, 1, 16),
+            raw_description='Synthetic gift',
+            amount=Decimal('10.00'),
+            classification=Transaction.Classification.OTHER_INFLOW,
+        )
+        with self.assertRaises(DjangoValidationError):
+            invalid.save()
+
     def test_unresolved_edits_return_reviewed_transactions_to_pending(self):
         wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
         transaction = Transaction.objects.create(
@@ -160,6 +198,46 @@ class TransactionModelTests(TestCase):
         self.assertEqual(transaction.amount, Decimal('-1.29'))
         self.assertEqual(transaction.raw_description, 'CARD PURCHASE COFFEE SHOP 1234')
         self.assertEqual(transaction.merchant, 'Local Coffee Roaster')
+
+
+class SubcategoryScopeMigrationTests(TransactionTestCase):
+    def test_existing_subcategories_and_transaction_snapshots_are_preserved(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate([('finance', '0007_budgettargetsettings_transaction_savings_effect_and_more')])
+        old_apps = executor.loader.project_state(
+            [('finance', '0007_budgettargetsettings_transaction_savings_effect_and_more')]
+        ).apps
+        Account = old_apps.get_model('finance', 'Account')
+        Subcategory = old_apps.get_model('finance', 'Subcategory')
+        Transaction = old_apps.get_model('finance', 'Transaction')
+        account = Account.objects.create(name='Migration test account')
+        subcategory = Subcategory.objects.create(name='Migration test category', budget_bucket='WANTS')
+        record = Transaction.objects.create(
+            account_id=account.pk,
+            subcategory_id=subcategory.pk,
+            date=date(2026, 1, 15),
+            raw_description='Synthetic migration transaction',
+            amount=Decimal('-12.00'),
+            classification='EXPENSE',
+            budget_bucket='WANTS',
+        )
+
+        try:
+            executor = MigrationExecutor(connection)
+            executor.migrate([('finance', '0008_remove_categorizationrule_valid_rule_classification_and_more')])
+            new_apps = executor.loader.project_state(
+                [('finance', '0008_remove_categorizationrule_valid_rule_classification_and_more')]
+            ).apps
+            NewSubcategory = new_apps.get_model('finance', 'Subcategory')
+            NewTransaction = new_apps.get_model('finance', 'Transaction')
+            migrated_category = NewSubcategory.objects.get(pk=subcategory.pk)
+            migrated_transaction = NewTransaction.objects.get(pk=record.pk)
+            self.assertEqual(migrated_category.scope, SubcategoryScope.BUDGET)
+            self.assertEqual(migrated_category.budget_bucket, BudgetBucket.WANTS)
+            self.assertEqual(migrated_transaction.budget_bucket, BudgetBucket.WANTS)
+        finally:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
 
 
 class LedgerApiTests(APITestCase):
@@ -355,6 +433,96 @@ class LedgerApiTests(APITestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(Subcategory.objects.count(), 1)
+
+    def test_other_inflow_categories_support_bulk_lifecycle_without_budget_buckets(self):
+        response = self.client.post(
+            '/api/subcategories/bulk-create/',
+            {'names': 'Gambling Winnings, Gifts', 'scope': SubcategoryScope.OTHER_INFLOW},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['count'], 2)
+        self.assertTrue(all(
+            item['scope'] == SubcategoryScope.OTHER_INFLOW and item['budget_bucket'] is None
+            for item in response.data['created']
+        ))
+
+        category_id = response.data['created'][0]['id']
+        changed = self.client.patch(
+            f'/api/subcategories/{category_id}/',
+            {'name': 'Prize Winnings'},
+            format='json',
+        )
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.data['name'], 'Prize Winnings')
+        archived = self.client.patch(
+            f'/api/subcategories/{category_id}/',
+            {'is_active': False},
+            format='json',
+        )
+        self.assertEqual(archived.status_code, 200)
+        reactivated = self.client.patch(
+            f'/api/subcategories/{category_id}/',
+            {'is_active': True},
+            format='json',
+        )
+        self.assertEqual(reactivated.status_code, 200)
+        self.assertEqual(reactivated.data['scope'], SubcategoryScope.OTHER_INFLOW)
+        self.assertIsNone(reactivated.data['budget_bucket'])
+
+    def test_transaction_api_enforces_other_inflow_category_scope(self):
+        other = Subcategory.objects.create(
+            name='Gifts',
+            scope=SubcategoryScope.OTHER_INFLOW,
+            budget_bucket=None,
+        )
+        budget = self.needs
+        incoming = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Synthetic payment from friend',
+            amount=Decimal('50.00'),
+            classification=Transaction.Classification.UNKNOWN,
+        )
+        response = self.client.patch(
+            f'/api/transactions/{incoming.pk}/',
+            {'classification': 'OTHER_INFLOW', 'subcategory': other.pk},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['budget_bucket'], '')
+
+        for classification in ('EXPENSE', 'REFUND', 'TRANSFER'):
+            with self.subTest(classification=classification):
+                record = Transaction.objects.create(
+                    account=self.account,
+                    date=date(2026, 1, 16),
+                    raw_description='Synthetic transaction',
+                    amount=Decimal('-10.00') if classification != 'REFUND' else Decimal('10.00'),
+                    classification=classification,
+                )
+                invalid = self.client.patch(
+                    f'/api/transactions/{record.pk}/',
+                    {'subcategory': other.pk},
+                    format='json',
+                )
+                self.assertEqual(invalid.status_code, 400)
+                self.assertIn('subcategory', invalid.data)
+
+        bad_inflow = self.client.post(
+            '/api/transactions/',
+            {
+                'account': self.account.pk,
+                'date': '2026-01-17',
+                'raw_description': 'Synthetic gift',
+                'amount': '10.00',
+                'classification': 'OTHER_INFLOW',
+                'subcategory': budget.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(bad_inflow.status_code, 400)
+        self.assertIn('subcategory', bad_inflow.data)
 
     def test_category_moves_preserve_existing_transaction_bucket_snapshots(self):
         category = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
@@ -1797,6 +1965,11 @@ class MonthlyAccountingTests(APITestCase):
         self.needs = Subcategory.objects.create(name='Groceries', budget_bucket=BudgetBucket.NEEDS)
         self.wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
         self.savings = Subcategory.objects.create(name='Emergency Fund', budget_bucket=BudgetBucket.SAVINGS)
+        self.other_inflow = Subcategory.objects.create(
+            name='Gifts',
+            scope=SubcategoryScope.OTHER_INFLOW,
+            budget_bucket=None,
+        )
         BudgetTargetSettings.objects.get(pk=1)
 
     def create_transaction(
@@ -1851,6 +2024,110 @@ class MonthlyAccountingTests(APITestCase):
         self.assertEqual(report['data_completeness']['blockers']['UNKNOWN']['transaction_count'], 1)
         self.assertEqual(report['period']['start_date'], '2026-10-01')
         self.assertEqual(report['period']['end_date'], '2026-10-31')
+
+    def test_other_inflows_do_not_affect_income_allocations_or_remaining(self):
+        gambling = Subcategory.objects.create(name='Gambling', budget_bucket=BudgetBucket.WANTS)
+        winnings = Subcategory.objects.create(
+            name='Gambling Winnings',
+            scope=SubcategoryScope.OTHER_INFLOW,
+            budget_bucket=None,
+        )
+        self.create_transaction(classification='INCOME', amount='6000.00')
+        self.create_transaction(classification='INCOME', amount='200.00', raw_description='Synthetic work payment')
+        self.create_transaction(amount='-100.00', subcategory=self.wants, raw_description='Synthetic dinner')
+        self.create_transaction(
+            classification='REFUND',
+            amount='50.00',
+            subcategory=self.wants,
+            raw_description='Synthetic friend reimbursement',
+        )
+        self.create_transaction(
+            amount='-100.00',
+            subcategory=gambling,
+            raw_description='Synthetic casino spending',
+        )
+        self.create_transaction(
+            classification='OTHER_INFLOW',
+            amount='125.00',
+            subcategory=winnings,
+            raw_description='Synthetic gambling winnings',
+        )
+        self.create_transaction(
+            classification='OTHER_INFLOW',
+            amount='50.00',
+            subcategory=self.other_inflow,
+            raw_description='Synthetic birthday gift',
+        )
+        self.create_transaction(
+            classification='OTHER_INFLOW',
+            amount='30.00',
+            raw_description='Synthetic uncategorized inflow',
+        )
+        self.create_transaction(
+            classification='OTHER_INFLOW',
+            amount='-5.00',
+            subcategory=self.other_inflow,
+            raw_description='Synthetic reward correction',
+        )
+        returned_loan = self.create_transaction(
+            classification='TRANSFER',
+            amount='100.00',
+            raw_description='Synthetic returned loan',
+        )
+        returned_loan.mark_reviewed()
+        self.create_transaction(
+            classification='UNKNOWN',
+            amount='50.00',
+            raw_description='VENMO FROM SYNTHETIC PERSON',
+        )
+
+        report = self.report()
+        summary = report['summary']
+        self.assertEqual(summary['income']['amount'], '6200.00')
+        self.assertEqual(summary['other_inflows']['amount'], '200.00')
+        self.assertEqual(summary['wants']['amount'], '150.00')
+        self.assertEqual(summary['wants']['actual_percent'], '2.42')
+        self.assertEqual(summary['remaining']['amount'], '6050.00')
+        self.assertEqual(
+            {row['subcategory_name']: row['amount'] for row in report['other_inflows_breakdown']},
+            {'Gambling Winnings': '125.00', 'Gifts': '45.00', 'Uncategorized': '30.00'},
+        )
+        self.assertEqual(report['data_completeness']['blockers']['UNKNOWN']['transaction_count'], 1)
+        other_rows = drilldown_rows(report, 'other_inflows')
+        self.assertEqual(
+            sum(Decimal(row['contribution']) for row in other_rows),
+            Decimal('200.00'),
+        )
+        refund_rows = drilldown_rows(report, 'wants')
+        self.assertTrue(any(row['classification'] == 'REFUND' for row in refund_rows))
+        self.assertFalse(any(row['classification'] == 'OTHER_INFLOW' for row in refund_rows))
+
+        winnings.name = 'Archived winnings'
+        winnings.is_active = False
+        winnings.save()
+        archived_report = self.report()
+        self.assertEqual(archived_report['summary']['other_inflows']['amount'], '200.00')
+        self.assertIn(
+            {'subcategory_name': 'Archived winnings', 'amount': '125.00', 'subcategory': winnings.pk, 'transaction_count': 1},
+            archived_report['other_inflows_breakdown'],
+        )
+
+        response = self.client.get(
+            f'/api/reports/monthly/drilldown/?year=2026&month=10&metric=other_inflows&subcategory={winnings.pk}'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            sum(Decimal(row['contribution']) for row in response.data['results']),
+            Decimal('125.00'),
+        )
+        uncategorized = self.client.get(
+            '/api/reports/monthly/drilldown/?year=2026&month=10&metric=other_inflows&subcategory=uncategorized'
+        )
+        self.assertEqual(uncategorized.status_code, 200)
+        self.assertEqual(
+            sum(Decimal(row['contribution']) for row in uncategorized.data['results']),
+            Decimal('30.00'),
+        )
 
     def test_historical_bucket_and_current_subcategory_name_are_used(self):
         expense = self.create_transaction(amount='-50.00', subcategory=self.needs)
@@ -2085,6 +2362,13 @@ class MonthlyAccountingTests(APITestCase):
             year=2026,
             month=10,
         )
+        self.create_transaction(
+            classification='OTHER_INFLOW',
+            amount='125.00',
+            subcategory=self.other_inflow,
+            year=2026,
+            month=10,
+        )
         targets = BudgetTargetSettings.objects.get(pk=1)
         monthly = monthly_report(2026, 10, targets)
         annual = year_report(2026, targets)
@@ -2098,12 +2382,15 @@ class MonthlyAccountingTests(APITestCase):
         self.assertEqual(annual['summary']['savings_withdrawals']['amount'], '25.00')
         self.assertEqual(annual['summary']['net_savings_activity']['amount'], '75.00')
         self.assertEqual(annual['summary']['remaining']['amount'], '1450.00')
+        self.assertEqual(annual['summary']['other_inflows']['amount'], '125.00')
         self.assertEqual(all_time['years'][1]['summary'], annual['summary'])
         self.assertEqual(all_time['period'], {
             'start_date': '2025-12-15',
             'end_date': '2026-10-15',
         })
         self.assertEqual(all_time['summary']['income']['amount'], '3000.00')
+        self.assertEqual(all_time['summary']['other_inflows']['amount'], '125.00')
+        self.assertEqual(all_time['months'][-1]['summary']['other_inflows']['amount'], '125.00')
         self.assertEqual(all_time['summary']['needs']['actual_percent'], '8.33')
         self.assertEqual(len(annual['months']), 12)
         self.assertEqual(annual['months'][0]['ledger_transaction_count'], 0)
@@ -2112,6 +2399,15 @@ class MonthlyAccountingTests(APITestCase):
         self.assertEqual(all_time['monthly_series'][-1]['savings_withdrawals'], '25.00')
         self.assertEqual(all_time['monthly_series'][-1]['net_savings_activity'], '75.00')
         self.assertEqual(all_time['monthly_series'][-1]['remaining'], '1450.00')
+        self.assertEqual(all_time['monthly_series'][-1]['other_inflows'], '125.00')
+        all_time_drilldown = self.client.get(
+            '/api/reports/drilldown/?scope=all&metric=other_inflows'
+        )
+        self.assertEqual(all_time_drilldown.status_code, 200)
+        self.assertEqual(
+            sum(Decimal(row['contribution']) for row in all_time_drilldown.data['results']),
+            Decimal('125.00'),
+        )
 
         response = self.client.get('/api/reports/yearly/?year=2026')
         self.assertEqual(response.status_code, 200)
@@ -2124,6 +2420,7 @@ class MonthlyAccountingTests(APITestCase):
             ('savings_withdrawals', Decimal('25.00')),
             ('net_savings_activity', Decimal('75.00')),
             ('remaining', Decimal('1450.00')),
+            ('other_inflows', Decimal('125.00')),
         ):
             result = self.client.get(
                 f'/api/reports/drilldown/?scope=year&year=2026&metric={metric}'

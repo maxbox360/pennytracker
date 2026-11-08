@@ -3,8 +3,9 @@ import type { FormEvent } from 'react'
 import { apiFetch } from './api'
 
 type Bucket = 'NEEDS' | 'WANTS' | 'SAVINGS'
-type Subcategory = { id: number; name: string; budget_bucket: Bucket; is_active: boolean }
-type Draft = { name: string; budget_bucket: Bucket }
+type Scope = 'BUDGET' | 'OTHER_INFLOW'
+type Subcategory = { id: number; name: string; scope: Scope; budget_bucket: Bucket | null; is_active: boolean }
+type Draft = { name: string; budget_bucket: Bucket | null }
 
 const buckets: Bucket[] = ['NEEDS', 'WANTS', 'SAVINGS']
 const labels: Record<Bucket, string> = { NEEDS: 'Needs', WANTS: 'Wants', SAVINGS: 'Savings' }
@@ -42,6 +43,7 @@ export default function Categories() {
   const [drafts, setDrafts] = useState<Record<number, Draft>>({})
   const [name, setName] = useState('')
   const [bucket, setBucket] = useState<Bucket>('NEEDS')
+  const [scope, setScope] = useState<Scope>('BUDGET')
   const [showArchived, setShowArchived] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -91,7 +93,11 @@ export default function Categories() {
       const response = await apiFetch('/api/subcategories/bulk-create/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ names: name, budget_bucket: bucket }),
+        body: JSON.stringify({
+          names: name,
+          scope,
+          budget_bucket: scope === 'BUDGET' ? bucket : null,
+        }),
       })
       const result = await response.json() as {
         count: number
@@ -164,20 +170,39 @@ export default function Categories() {
           />
         </label>
         <label>
+          Category group
+          <select value={scope} onChange={(event) => setScope(event.target.value as Scope)}>
+            <option value="BUDGET">Budget allocation</option>
+            <option value="OTHER_INFLOW">Other Inflows</option>
+          </select>
+        </label>
+        {scope === 'BUDGET' && <label>
           Budget bucket
           <select value={bucket} onChange={(event) => setBucket(event.target.value as Bucket)}>
             {buckets.map((value) => <option key={value} value={value}>{labels[value]}</option>)}
           </select>
-        </label>
+        </label>}
         <button className="primary-button" type="submit">Create subcategories</button>
       </form>
 
-      {buckets.map((value) => {
-        const group = visible.filter((category) => category.budget_bucket === value)
+      {[
+        ...buckets.map((value) => ({
+          key: value,
+          title: labels[value],
+          categories: visible.filter((category) => (
+            category.scope === 'BUDGET' && category.budget_bucket === value
+          )),
+        })),
+        {
+          key: 'OTHER_INFLOW',
+          title: 'Other Inflows',
+          categories: visible.filter((category) => category.scope === 'OTHER_INFLOW'),
+        },
+      ].map(({ key, title, categories: group }) => {
         if (!group.length) return null
         return (
-          <section className="category-group" key={value} aria-labelledby={`bucket-${value}`}>
-            <h3 id={`bucket-${value}`}>{labels[value]}</h3>
+          <section className="category-group" key={key} aria-labelledby={`bucket-${key}`}>
+            <h3 id={`bucket-${key}`}>{title}</h3>
             <div className="category-list">
               {group.map((category) => {
                 const draft = drafts[category.id] ?? { name: category.name, budget_bucket: category.budget_bucket }
@@ -194,10 +219,10 @@ export default function Categories() {
                         }))}
                       />
                     </label>
-                    <label>
+                    {category.scope === 'BUDGET' && <label>
                       Bucket
                       <select
-                        value={draft.budget_bucket}
+                        value={draft.budget_bucket || 'NEEDS'}
                         onChange={(event) => setDrafts((current) => ({
                           ...current,
                           [category.id]: { ...draft, budget_bucket: event.target.value as Bucket },
@@ -205,7 +230,7 @@ export default function Categories() {
                       >
                         {buckets.map((option) => <option key={option} value={option}>{labels[option]}</option>)}
                       </select>
-                    </label>
+                    </label>}
                     <span className={`category-state ${category.is_active ? '' : 'category-state--archived'}`}>
                       {category.is_active ? 'Active' : 'Archived'}
                     </span>
