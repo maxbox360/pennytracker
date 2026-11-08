@@ -198,6 +198,167 @@
   background: var(--surface);
 }
 
+.rules-panel {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.categorization-preview,
+.categorization-conflict,
+.rule-provenance {
+  display: block;
+  max-width: 360px;
+  margin-top: 3px;
+  color: var(--positive);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.categorization-conflict,
+.rule-warning {
+  color: var(--warning);
+}
+
+.rule-provenance {
+  color: var(--muted);
+}
+
+.remember-rule {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--border);
+  padding: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.remember-rule-toggle {
+  display: flex !important;
+  align-items: center;
+  gap: 7px !important;
+  color: var(--text) !important;
+}
+
+.remember-rule input[type='checkbox'] {
+  min-height: auto;
+  accent-color: var(--accent);
+}
+
+.remember-rule p,
+.rule-preview {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.rule-apply-prompt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 14px;
+  background: var(--warning-soft);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.rule-editor {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(200px, 1.4fr) minmax(180px, 1fr);
+  align-items: end;
+  gap: 9px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+
+.rule-editor label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 580;
+}
+
+.rule-editor input,
+.rule-editor select {
+  min-height: 31px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 5px 7px;
+  background: var(--input);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.rule-preview,
+.rule-editor .editor-actions {
+  grid-column: 1 / -1;
+}
+
+.rule-list {
+  padding: 0 16px;
+}
+
+.rule-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.3fr) minmax(160px, 1fr) 70px auto;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding: 10px 0;
+}
+
+.rule-condition,
+.rule-target {
+  display: grid;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: normal;
+}
+
+.rule-condition strong,
+.rule-target span {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.rule-row--disabled {
+  opacity: 0.72;
+}
+
+.rule-warning {
+  font-size: 10px;
+}
+
+.rule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.rule-actions button {
+  min-height: 29px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.rule-actions button:hover {
+  border-color: var(--accent);
+}
+
 .import-card {
   margin-bottom: 16px;
 }
@@ -261,6 +422,7 @@
 .duplicate-actions select,
 .category-create input,
 .category-create select,
+.category-create textarea,
 .category-row input,
 .category-row select,
 .inline-category-fields input,
@@ -273,6 +435,11 @@
   color: var(--text);
   font: inherit;
   font-size: 12px;
+}
+
+.category-create textarea {
+  min-height: 48px;
+  resize: vertical;
 }
 
 .preview-content {
@@ -812,11 +979,16 @@ td.amount-cell {
   }
 
   .transaction-editor,
-  .category-row {
+  .category-row,
+  .rule-row,
+  .rule-editor {
     grid-template-columns: 1fr 1fr;
   }
 
-  .editor-actions {
+  .editor-actions,
+  .rule-condition,
+  .rule-target,
+  .rule-preview {
     grid-column: 1 / -1;
   }
 

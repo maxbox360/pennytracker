@@ -1,3 +1,5 @@
+import re
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Q, TextField, Value
@@ -20,8 +22,17 @@ from .csv_imports import (
     overlap_results,
     parse_csv,
 )
+from .categorization_rules import (
+    apply_rule_to_transaction,
+    evaluate_import_rows,
+    evaluate_rules,
+    pending_matches_for_rule,
+    rules_for_evaluation,
+)
 from .models import (
     Account,
+    BudgetBucket,
+    CategorizationRule,
     DuplicateResolution,
     ImportBatch,
     ReviewStatus,
@@ -31,6 +42,7 @@ from .models import (
 )
 from .serializers import (
     AccountSerializer,
+    CategorizationRuleSerializer,
     ImportBatchSerializer,
     SubcategorySerializer,
     TransactionSerializer,
@@ -46,12 +58,155 @@ class SubcategoryViewSet(ModelViewSet):
     queryset = Subcategory.objects.all()
     serializer_class = SubcategorySerializer
 
+    @action(detail=False, methods=['post'], url_path='bulk-create')
+    def bulk_create(self, request):
+        raw_names = request.data.get('names')
+        if not isinstance(raw_names, str):
+            raise ValidationError({'names': 'Enter subcategory names as text.'})
+
+        names = [name.strip() for name in re.split(r'[,\n]', raw_names) if name.strip()]
+        if not names:
+            raise ValidationError({'names': 'Enter at least one subcategory name.'})
+
+        existing = list(Subcategory.objects.all())
+        active = {item.name.strip().casefold(): item for item in existing if item.is_active}
+        archived = {item.name.strip().casefold(): item for item in existing if not item.is_active}
+        seen = set()
+        serializers = []
+        invalid = []
+        already_exists = []
+        archived_matches = []
+        duplicate_count = 0
+        for name in names:
+            normalized_name = name.casefold()
+            if normalized_name in seen:
+                duplicate_count += 1
+                continue
+            seen.add(normalized_name)
+            if normalized_name in active:
+                already_exists.append(active[normalized_name].name)
+                continue
+            if normalized_name in archived:
+                archived_matches.append(archived[normalized_name].name)
+                continue
+
+            serializer = SubcategorySerializer(data={
+                'name': name,
+                'budget_bucket': request.data.get('budget_bucket'),
+            })
+            if not serializer.is_valid():
+                messages = [
+                    str(message)
+                    for field_errors in serializer.errors.values()
+                    for message in field_errors
+                ]
+                invalid.append({'name': name, 'message': ' '.join(messages)})
+                continue
+            serializers.append(serializer)
+
+        if invalid:
+            raise ValidationError({'invalid': invalid})
+
+        with transaction.atomic():
+            categories = [serializer.save() for serializer in serializers]
+
+        return Response(
+            {
+                'count': len(categories),
+                'created': SubcategorySerializer(categories, many=True).data,
+                'already_exists': already_exists,
+                'archived': archived_matches,
+                'duplicate_count': duplicate_count,
+                'submitted_count': len(names),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
     def get_queryset(self):
         queryset = super().get_queryset()
         active = self.request.query_params.get('is_active')
         if active in ('true', 'false'):
             queryset = queryset.filter(is_active=active == 'true')
         return queryset
+
+
+class CategorizationRuleViewSet(ModelViewSet):
+    serializer_class = CategorizationRuleSerializer
+    queryset = CategorizationRule.objects.select_related('subcategory')
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        active = self.request.query_params.get('is_active')
+        if active in ('true', 'false'):
+            queryset = queryset.filter(is_active=active == 'true')
+        return queryset
+
+    def destroy(self, request, *args, **kwargs):
+        rule = self.get_object()
+        if rule.categorized_transactions.exists():
+            return Response(
+                {'detail': 'This rule has categorized transactions; disable it to preserve provenance.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['get'], url_path='pending-matches')
+    def pending_matches(self, request, pk=None):
+        rule = self.get_object()
+        if not rule.is_active or not rule.subcategory.is_active:
+            return Response({
+                'matching_pending_count': 0,
+                'conflicting_pending_count': 0,
+            })
+        matches, conflicts = pending_matches_for_rule(rule)
+        return Response({
+            'matching_pending_count': len(matches),
+            'conflicting_pending_count': len(conflicts),
+        })
+
+    @action(detail=True, methods=['post'], url_path='apply-to-pending')
+    def apply_to_pending(self, request, pk=None):
+        try:
+            with transaction.atomic():
+                rule = (
+                    CategorizationRule.objects.select_for_update()
+                    .select_related('subcategory')
+                    .get(pk=pk)
+                )
+                if not rule.is_active:
+                    raise ValidationError({'detail': 'Enable this rule before applying it.'})
+                if not rule.subcategory.is_active:
+                    raise ValidationError({'detail': 'Reactivate the target subcategory before applying this rule.'})
+                if rule.subcategory.budget_bucket not in (BudgetBucket.NEEDS, BudgetBucket.WANTS):
+                    raise ValidationError({'detail': 'Expense rules require a Needs or Wants target subcategory.'})
+                if rule.classification != TransactionClassification.EXPENSE:
+                    raise ValidationError({'detail': 'Only Expense rules can be applied.'})
+                rules = rules_for_evaluation()
+                candidates = list(
+                    Transaction.objects.select_for_update().filter(
+                        review_status=ReviewStatus.PENDING,
+                        classification=TransactionClassification.EXPENSE,
+                        subcategory__isnull=True,
+                    ).order_by('pk')
+                )
+                matches, conflicts = pending_matches_for_rule(rule, candidates=candidates, rules=rules)
+                for transaction_record in matches:
+                    result = evaluate_rules(
+                        transaction_record.classification,
+                        transaction_record.raw_description,
+                        rules,
+                    )
+                    apply_rule_to_transaction(transaction_record, result['rule'])
+        except CategorizationRule.DoesNotExist:
+            return Response({'detail': 'Categorization rule not found.'}, status=status.HTTP_404_NOT_FOUND)
+        except DjangoValidationError as error:
+            return Response({'detail': error.message_dict}, status=status.HTTP_400_BAD_REQUEST)
+        except ValidationError as error:
+            return Response(error.detail, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'updated_count': len(matches),
+            'conflicting_count': len(conflicts),
+        })
 
 
 class TransactionPagination(PageNumberPagination):
@@ -112,9 +267,62 @@ class TransactionViewSet(ModelViewSet):
             'subcategory': SubcategorySerializer(subcategory).data,
         }, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['post'], url_path='save-with-rule')
+    def save_with_rule(self, request, pk=None):
+        try:
+            with transaction.atomic():
+                transaction_record = self.get_object()
+                transaction_serializer = TransactionSerializer(
+                    transaction_record,
+                    data={
+                        key: request.data[key]
+                        for key in ('classification', 'subcategory', 'merchant', 'notes')
+                        if key in request.data
+                    },
+                    partial=True,
+                )
+                transaction_serializer.is_valid(raise_exception=True)
+                transaction_record = transaction_serializer.save()
+                if (
+                    transaction_record.classification != TransactionClassification.EXPENSE
+                    or transaction_record.subcategory_id is None
+                ):
+                    raise ValidationError({
+                        'subcategory': 'Assign an Expense subcategory before creating a rule.'
+                    })
+                rule_serializer = CategorizationRuleSerializer(data={
+                    'name': request.data.get('name', ''),
+                    'match_field': request.data.get('match_field', 'RAW_DESCRIPTION'),
+                    'match_type': request.data.get('match_type', 'CONTAINS'),
+                    'match_value': request.data.get('match_value', ''),
+                    'classification': TransactionClassification.EXPENSE,
+                    'subcategory': transaction_record.subcategory_id,
+                    'is_active': True,
+                })
+                rule_serializer.is_valid(raise_exception=True)
+                rule = rule_serializer.save()
+                matches, conflicts = pending_matches_for_rule(
+                    rule,
+                    exclude_ids=(transaction_record.pk,),
+                )
+        except DjangoValidationError as error:
+            return Response({'detail': error.message_dict}, status=status.HTTP_400_BAD_REQUEST)
+        except ValidationError as error:
+            return Response(error.detail, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'transaction': TransactionSerializer(transaction_record).data,
+            'rule': CategorizationRuleSerializer(rule).data,
+            'matching_pending_count': len(matches),
+            'conflicting_pending_count': len(conflicts),
+        }, status=status.HTTP_201_CREATED)
+
     def get_queryset(self):
         queryset = (
-            Transaction.objects.select_related('account', 'subcategory', 'duplicate_of')
+            Transaction.objects.select_related(
+                'account',
+                'subcategory',
+                'duplicate_of',
+            )
             .prefetch_related('duplicate_candidates')
         )
         params = self.request.query_params
@@ -178,6 +386,8 @@ class TransactionViewSet(ModelViewSet):
                 queryset = queryset.filter(duplicate_resolution=DuplicateResolution.UNRESOLVED)
             elif review_reason == 'TRANSFER':
                 queryset = queryset.filter(classification=TransactionClassification.TRANSFER)
+            elif review_reason == 'RULE_CONFLICT':
+                queryset = queryset.filter(categorization_rule_conflict=True)
             else:
                 raise ValidationError({'review_reason': 'Choose a valid review reason.'})
 
@@ -307,9 +517,12 @@ class TransactionViewSet(ModelViewSet):
                             })
                     for record in records:
                         record.subcategory = subcategory
+                        record.categorized_by_rule = None
                         record.save(update_fields=(
                             'subcategory',
                             'budget_bucket',
+                            'categorized_by_rule',
+                            'categorization_rule_conflict',
                             'review_status',
                             'updated_at',
                         ))
@@ -383,23 +596,11 @@ def preview_import(request):
 
     digest = file_hash(content)
     already_imported = ImportBatch.objects.filter(account=account, file_sha256=digest).exists()
-    rows = overlap_results(account, parsed.rows)
+    rows = evaluate_import_rows(overlap_results(account, parsed.rows))
     new_count = sum(row['overlap_status'] == 'NEW' for row in rows)
     represented_count = sum(row['overlap_status'] == 'ALREADY_REPRESENTED' for row in rows)
     possible_count = sum(row['overlap_status'] == 'POSSIBLE_DUPLICATE' for row in rows)
-    review_count = sum(
-        row['overlap_status'] != 'ALREADY_REPRESENTED'
-        and (
-            row['overlap_status'] == 'POSSIBLE_DUPLICATE'
-            or row['classification'] in (
-                TransactionClassification.UNKNOWN,
-                TransactionClassification.EXPENSE,
-                TransactionClassification.REFUND,
-                TransactionClassification.TRANSFER,
-            )
-        )
-        for row in rows
-    )
+    review_count = sum(_import_row_needs_review(row) for row in rows)
     return Response({
         'account': {'id': account.id, 'name': account.name},
         'filename': filename,
@@ -425,6 +626,7 @@ def preview_import(request):
             'classification': row['classification'],
             'overlap_status': row['overlap_status'],
             'overlap_reason': row['overlap_reason'],
+            'categorization': _preview_categorization(row),
             'duplicate_candidates': [{
                 'id': candidate.id,
                 'date': candidate.date.isoformat(),
@@ -439,6 +641,53 @@ def preview_import(request):
         'already_imported': already_imported,
         'can_import': not parsed.errors and not already_imported,
     })
+
+
+def _import_row_needs_review(row):
+    if row['overlap_status'] == 'ALREADY_REPRESENTED':
+        return False
+    if row['overlap_status'] == 'POSSIBLE_DUPLICATE':
+        return True
+    classification = row['classification']
+    if classification in (
+        TransactionClassification.UNKNOWN,
+        TransactionClassification.REFUND,
+        TransactionClassification.TRANSFER,
+    ):
+        return True
+    return (
+        classification == TransactionClassification.EXPENSE
+        and (
+            row['_categorization']['subcategory'] is None
+            or row['_categorization']['conflict']
+        )
+    )
+
+
+def _preview_categorization(row):
+    result = row['_categorization']
+    if result['conflict']:
+        status_value = 'RULE_CONFLICT'
+    elif result['subcategory']:
+        status_value = 'AUTO_CATEGORIZED'
+    else:
+        status_value = 'NOT_CATEGORIZED'
+    return {
+        'status': status_value,
+        'subcategory': (
+            {
+                'id': result['subcategory'].id,
+                'name': result['subcategory'].name,
+                'budget_bucket': result['subcategory'].budget_bucket,
+            }
+            if result['subcategory'] else None
+        ),
+        'rules': [{
+            'id': rule.id,
+            'match_value': rule.match_value,
+            'subcategory_name': rule.subcategory.name,
+        } for rule in result['rules']],
+    }
 
 
 @api_view(['POST'])

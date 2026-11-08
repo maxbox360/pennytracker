@@ -19,6 +19,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from finance.views import (
     AccountViewSet,
+    CategorizationRuleViewSet,
     ImportBatchViewSet,
     SubcategoryViewSet,
     TransactionViewSet,
@@ -31,6 +32,7 @@ router = DefaultRouter()
 router.register('accounts', AccountViewSet)
 router.register('import-batches', ImportBatchViewSet)
 router.register('subcategories', SubcategoryViewSet)
+router.register('categorization-rules', CategorizationRuleViewSet, basename='categorization-rule')
 router.register('transactions', TransactionViewSet, basename='transaction')
 
 urlpatterns = [

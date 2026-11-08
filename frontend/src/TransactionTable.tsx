@@ -23,6 +23,8 @@ type Transaction = {
   account_name: string
   subcategory: number | null
   subcategory_name: string | null
+  categorized_by_rule: number | null
+  categorization_rule_conflict: boolean
   date: string
   posted_date: string | null
   raw_description: string
@@ -40,7 +42,14 @@ type Transaction = {
 }
 
 type Props = { mode: 'transactions' | 'review'; reload: number }
-type Draft = { classification: Classification; subcategory: string; merchant: string; notes: string }
+type Draft = {
+  classification: Classification
+  subcategory: string
+  merchant: string
+  notes: string
+  rememberRule: boolean
+  ruleMatchValue: string
+}
 type SortField = 'date' | 'description' | 'account' | 'source_type' | 'classification' | 'subcategory' | 'review_status' | 'amount'
 
 const classifications: Classification[] = [
@@ -76,6 +85,10 @@ function errorText(value: unknown): string {
   if (typeof value === 'string') return value
   if (value && typeof value === 'object') return JSON.stringify(value)
   return 'The request failed.'
+}
+
+function normalizedRuleValue(value: string) {
+  return value.replace(/\s+/g, ' ').trim()
 }
 
 function acceptsBucket(classification: Classification, bucket: Bucket) {
@@ -124,6 +137,11 @@ export default function TransactionTable({ mode, reload }: Props) {
   const [selected, setSelected] = useState<number[]>([])
   const [bulkClassification, setBulkClassification] = useState<Classification | ''>('')
   const [bulkSubcategory, setBulkSubcategory] = useState('')
+  const [pendingRulePrompt, setPendingRulePrompt] = useState<{
+    id: number
+    matching: number
+    conflicting: number
+  } | null>(null)
 
   useEffect(() => {
     setReviewStatusFilter(mode === 'review' ? 'PENDING' : '')
@@ -226,6 +244,8 @@ export default function TransactionTable({ mode, reload }: Props) {
       subcategory: item.subcategory ? String(item.subcategory) : '',
       merchant: item.merchant,
       notes: item.notes,
+      rememberRule: false,
+      ruleMatchValue: item.raw_description,
     })
   }
 
@@ -234,19 +254,32 @@ export default function TransactionTable({ mode, reload }: Props) {
     if (editingId === null || !draft) return
     setError('')
     try {
-      const response = await apiFetch(`/api/transactions/${editingId}/`, {
-        method: 'PATCH',
+      const response = await apiFetch(`/api/transactions/${editingId}/${draft.rememberRule ? 'save-with-rule/' : ''}`, {
+        method: draft.rememberRule ? 'POST' : 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           classification: draft.classification,
           subcategory: draft.subcategory || null,
           merchant: draft.merchant,
           notes: draft.notes,
+          ...(draft.rememberRule ? { match_value: draft.ruleMatchValue } : {}),
         }),
       })
       const result = await response.json()
       if (!response.ok) throw new Error(errorText(result.detail ?? result) || `Save failed (${response.status})`)
-      setNotice('Transaction updated.')
+      if (draft.rememberRule) {
+        setNotice('Transaction updated and categorization rule created.')
+        if (result.matching_pending_count > 0 || result.conflicting_pending_count > 0) {
+          setPendingRulePrompt({
+            id: result.rule.id as number,
+            matching: result.matching_pending_count as number,
+            conflicting: result.conflicting_pending_count as number,
+          })
+        }
+      } else {
+        setNotice('Transaction updated.')
+        setPendingRulePrompt(null)
+      }
       refresh()
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Unable to save transaction')
@@ -289,6 +322,27 @@ export default function TransactionTable({ mode, reload }: Props) {
       refresh()
     } catch (bulkError) {
       setError(bulkError instanceof Error ? bulkError.message : 'Bulk action failed')
+    }
+  }
+
+  async function applyPendingRule() {
+    if (!pendingRulePrompt) return
+    setError('')
+    try {
+      const response = await apiFetch(
+        `/api/categorization-rules/${pendingRulePrompt.id}/apply-to-pending/`,
+        { method: 'POST' },
+      )
+      const result = await response.json()
+      if (!response.ok) throw new Error(errorText(result.detail ?? result))
+      setNotice(
+        `Applied the rule to ${result.updated_count} transactions.`
+        + (result.conflicting_count ? ` ${result.conflicting_count} conflicting transactions remain in Review.` : ''),
+      )
+      setPendingRulePrompt(null)
+      refresh()
+    } catch (applyError) {
+      setError(applyError instanceof Error ? applyError.message : 'Unable to apply rule')
     }
   }
 
@@ -395,6 +449,7 @@ export default function TransactionTable({ mode, reload }: Props) {
               <option value="UNCATEGORIZED">Uncategorized expense/refund</option>
               <option value="POSSIBLE_DUPLICATE">Possible duplicate</option>
               <option value="TRANSFER">Transfer</option>
+              <option value="RULE_CONFLICT">Rule conflict</option>
             </select>
           </label>
         )}
@@ -447,6 +502,24 @@ export default function TransactionTable({ mode, reload }: Props) {
 
       {notice && <p className="table-notice" role="status">{notice}</p>}
       {error && <p className="message message--error" role="alert">{error}</p>}
+      {pendingRulePrompt && mode === 'review' && (
+        <div className="rule-apply-prompt" role="status">
+          <span>
+            {pendingRulePrompt.matching > 0
+              ? `${pendingRulePrompt.matching} other pending transaction${pendingRulePrompt.matching === 1 ? '' : 's'} match this rule. Apply it?`
+              : 'No compatible pending transactions can be applied.'}
+            {pendingRulePrompt.conflicting > 0
+              ? ` ${pendingRulePrompt.conflicting} conflicting match${pendingRulePrompt.conflicting === 1 ? '' : 'es'} will remain in Review.`
+              : ''}
+          </span>
+          {pendingRulePrompt.matching > 0 && (
+            <button type="button" className="primary-button" onClick={() => void applyPendingRule()}>
+              Apply to matching pending transactions
+            </button>
+          )}
+          <button type="button" className="quiet-button" onClick={() => setPendingRulePrompt(null)}>Not now</button>
+        </div>
+      )}
       {loading ? (
         <p className="message" role="status">Loading transactions…</p>
       ) : transactions.length === 0 ? (
@@ -616,6 +689,9 @@ function FragmentRow(props: RowProps) {
           {item.subcategory_name ? (
             <span>{item.subcategory_name}<small className="bucket-label">{item.budget_bucket && bucketLabels[item.budget_bucket]}</small></span>
           ) : <span className="muted">Uncategorized</span>}
+          {item.categorized_by_rule && (
+            <small className="rule-provenance">Automatically categorized · Rule #{item.categorized_by_rule}</small>
+          )}
         </td>
         <td>
           {mode === 'review' && (
@@ -656,6 +732,7 @@ function FragmentRow(props: RowProps) {
                       subcategory: nextSubcategory && acceptsBucket(classification, nextSubcategory.budget_bucket)
                         ? draft.subcategory
                         : '',
+                      rememberRule: false,
                     })
                   }}
                 >
@@ -666,7 +743,14 @@ function FragmentRow(props: RowProps) {
               </label>
               <label>
                 Subcategory
-                <select value={draft.subcategory} onChange={(event) => props.onDraft({ ...draft, subcategory: event.target.value })}>
+                <select
+                  value={draft.subcategory}
+                  onChange={(event) => props.onDraft({
+                    ...draft,
+                    subcategory: event.target.value,
+                    rememberRule: event.target.value ? draft.rememberRule : false,
+                  })}
+                >
                   <option value="">No subcategory</option>
                   {eligibleSubcategories.map((subcategory) => (
                     <option key={subcategory.id} value={subcategory.id}>
@@ -733,6 +817,42 @@ function FragmentRow(props: RowProps) {
                   </div>
                 </details>
               )}
+              {mode === 'review'
+                && draft.classification === 'EXPENSE'
+                && Boolean(draft.subcategory)
+                && (
+                  <div className="remember-rule">
+                    <label className="remember-rule-toggle">
+                      <input
+                        type="checkbox"
+                        checked={draft.rememberRule}
+                        onChange={(event) => props.onDraft({
+                          ...draft,
+                          rememberRule: event.target.checked,
+                          ruleMatchValue: draft.ruleMatchValue || item.raw_description,
+                        })}
+                      />
+                      Remember this for future matching expenses
+                    </label>
+                    {draft.rememberRule && (
+                      <>
+                        <label>
+                          Description fragment (whitespace collapsed when saved)
+                          <input
+                            value={draft.ruleMatchValue}
+                            maxLength={200}
+                            required
+                            onChange={(event) => props.onDraft({ ...draft, ruleMatchValue: event.target.value })}
+                          />
+                        </label>
+                        <p>
+                          When an EXPENSE description contains “{normalizedRuleValue(draft.ruleMatchValue) || '…'}”,
+                          assign {subcategories.find((category) => category.id === Number(draft.subcategory))?.name}.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
               <label>
                 Clean merchant
                 <input value={draft.merchant} maxLength={200} onChange={(event) => props.onDraft({ ...draft, merchant: event.target.value })} />

@@ -15,6 +15,28 @@ function errorText(value: unknown): string {
   return 'The request failed.'
 }
 
+function bulkCreateError(value: unknown): string {
+  if (value && typeof value === 'object') {
+    const body = value as {
+      detail?: unknown
+      names?: unknown
+      invalid?: { name?: unknown; message?: unknown }[]
+    }
+    if (Array.isArray(body.invalid) && body.invalid.length) {
+      return body.invalid
+        .map((item) => `${String(item.name || 'Subcategory')}: ${String(item.message || 'Invalid name.')}`)
+        .join(' ')
+    }
+    if (typeof body.detail === 'string') return body.detail
+    if (typeof body.names === 'string') return body.names
+  }
+  return 'Unable to create subcategories. Check the names and selected budget bucket.'
+}
+
+function joinNames(names: string[]): string {
+  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
 export default function Categories() {
   const [categories, setCategories] = useState<Subcategory[]>([])
   const [drafts, setDrafts] = useState<Record<number, Draft>>({})
@@ -63,8 +85,52 @@ export default function Categories() {
 
   async function createCategory(event: FormEvent) {
     event.preventDefault()
-    if (await save('/api/subcategories/', 'POST', { name, budget_bucket: bucket }, 'Subcategory created.')) {
+    setError('')
+    setNotice('')
+    try {
+      const response = await apiFetch('/api/subcategories/bulk-create/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ names: name, budget_bucket: bucket }),
+      })
+      const result = await response.json() as {
+        count: number
+        already_exists: string[]
+        archived: string[]
+        duplicate_count: number
+        submitted_count: number
+      }
+      if (!response.ok) throw new Error(bulkCreateError(result))
       setName('')
+      await load()
+      const messages: string[] = []
+      if (result.count) {
+        messages.push(`${result.count} subcategor${result.count === 1 ? 'y' : 'ies'} created.`)
+      } else if (
+        result.already_exists.length === result.submitted_count
+        && result.duplicate_count === 0
+        && result.archived.length === 0
+      ) {
+        messages.push(`All ${result.submitted_count} subcategories already exist.`)
+      } else {
+        messages.push('No new subcategories were created.')
+      }
+      if (result.already_exists.length) {
+        messages.push(result.count
+          ? `${joinNames(result.already_exists)} already existed and were skipped.`
+          : `Already active and skipped: ${joinNames(result.already_exists)}.`)
+      }
+      if (result.duplicate_count) {
+        messages.push(`${result.duplicate_count} duplicate entr${result.duplicate_count === 1 ? 'y was' : 'ies were'} ignored.`)
+      }
+      if (result.archived.length === 1) {
+        messages.push(`${result.archived[0]} already exists but is archived. Reactivate it from Categories to use it again.`)
+      } else if (result.archived.length > 1) {
+        messages.push(`${joinNames(result.archived)} are archived. Reactivate them from Categories to use them again.`)
+      }
+      setNotice(messages.join(' '))
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Unable to create subcategories')
     }
   }
 
@@ -88,8 +154,14 @@ export default function Categories() {
 
       <form className="category-create" onSubmit={(event) => void createCategory(event)}>
         <label>
-          Name
-          <input value={name} maxLength={100} required onChange={(event) => setName(event.target.value)} />
+          Names
+          <textarea
+            value={name}
+            rows={2}
+            placeholder="Groceries, Utilities, Rent"
+            required
+            onChange={(event) => setName(event.target.value)}
+          />
         </label>
         <label>
           Budget bucket
@@ -97,7 +169,7 @@ export default function Categories() {
             {buckets.map((value) => <option key={value} value={value}>{labels[value]}</option>)}
           </select>
         </label>
-        <button className="primary-button" type="submit">Create subcategory</button>
+        <button className="primary-button" type="submit">Create subcategories</button>
       </form>
 
       {buckets.map((value) => {

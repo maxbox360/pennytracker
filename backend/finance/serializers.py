@@ -1,11 +1,16 @@
 from rest_framework import serializers
 from .models import (
     Account,
+    BudgetBucket,
+    CategorizationRule,
     ImportBatch,
+    RuleMatchField,
+    RuleMatchType,
     Subcategory,
     Transaction,
     TransactionClassification,
 )
+from .categorization_rules import normalize_rule_text, stored_rule_value
 
 
 class ImportBatchSerializer(serializers.ModelSerializer):
@@ -69,6 +74,93 @@ class SubcategorySerializer(serializers.ModelSerializer):
         return value.strip()
 
 
+class CategorizationRuleSerializer(serializers.ModelSerializer):
+    subcategory_name = serializers.CharField(source='subcategory.name', read_only=True)
+    subcategory_bucket = serializers.CharField(source='subcategory.budget_bucket', read_only=True)
+
+    class Meta:
+        model = CategorizationRule
+        fields = (
+            'id',
+            'name',
+            'match_field',
+            'match_type',
+            'match_value',
+            'classification',
+            'subcategory',
+            'subcategory_name',
+            'subcategory_bucket',
+            'subcategory_is_active',
+            'is_active',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('created_at', 'updated_at')
+
+    subcategory_is_active = serializers.BooleanField(source='subcategory.is_active', read_only=True)
+
+    def validate_match_value(self, value):
+        value = stored_rule_value(value)
+        if not value:
+            raise serializers.ValidationError('Enter a non-empty description fragment.')
+        return value
+
+    def validate_name(self, value):
+        return value.strip()
+
+    def validate(self, attrs):
+        values = {
+            field: attrs.get(field, getattr(self.instance, field, default))
+            for field, default in (
+                ('match_field', RuleMatchField.RAW_DESCRIPTION),
+                ('match_type', RuleMatchType.CONTAINS),
+                ('classification', TransactionClassification.EXPENSE),
+                ('match_value', ''),
+                ('subcategory', None),
+                ('is_active', True),
+            )
+        }
+        errors = {}
+        if values['match_field'] != RuleMatchField.RAW_DESCRIPTION:
+            errors['match_field'] = 'Only raw description matching is supported.'
+        if values['match_type'] != RuleMatchType.CONTAINS:
+            errors['match_type'] = 'Only contains matching is supported.'
+        if values['classification'] != TransactionClassification.EXPENSE:
+            errors['classification'] = 'Categorization rules currently require Expense classification.'
+        subcategory = values['subcategory']
+        if subcategory is None:
+            errors['subcategory'] = 'Choose a subcategory.'
+        else:
+            target_unchanged = (
+                self.instance is not None
+                and self.instance.subcategory_id == subcategory.pk
+            )
+            target_is_usable = (
+                subcategory.is_active
+                and subcategory.budget_bucket in (BudgetBucket.NEEDS, BudgetBucket.WANTS)
+            )
+            if not target_unchanged and not subcategory.is_active:
+                errors['subcategory'] = 'Rules must target an active subcategory.'
+            elif not target_unchanged and not target_is_usable:
+                errors['subcategory'] = 'Expense rules must target a Needs or Wants subcategory.'
+            elif attrs.get('is_active') is True and not target_is_usable:
+                errors['is_active'] = 'Reactivate a valid Needs/Wants target before enabling this rule.'
+
+        match_value = normalize_rule_text(values['match_value'])
+        if values['is_active'] and match_value and not errors:
+            duplicate_rules = CategorizationRule.objects.filter(
+                is_active=True,
+                classification=values['classification'],
+                match_field=values['match_field'],
+                match_type=values['match_type'],
+            ).exclude(pk=self.instance.pk if self.instance else None)
+            if any(normalize_rule_text(rule.match_value) == match_value for rule in duplicate_rules):
+                errors['match_value'] = 'An active rule already uses this matching condition.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+
 class DuplicateCandidateSerializer(serializers.ModelSerializer):
     account_name = serializers.CharField(source='account.name', read_only=True)
 
@@ -105,6 +197,8 @@ class TransactionSerializer(serializers.ModelSerializer):
             'account_name',
             'subcategory',
             'subcategory_name',
+            'categorized_by_rule',
+            'categorization_rule_conflict',
             'date',
             'posted_date',
             'raw_description',
@@ -126,6 +220,8 @@ class TransactionSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             'budget_bucket',
+            'categorized_by_rule',
+            'categorization_rule_conflict',
             'review_status',
             'review_reasons',
             'duplicate_resolution',
@@ -140,6 +236,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             'UNRESOLVED_DUPLICATE': 'Possible duplicate needs resolution',
             'UNKNOWN_CLASSIFICATION': 'Choose a transaction classification',
             'SUBCATEGORY_REQUIRED': 'Assign a Needs/Wants subcategory',
+            'RULE_CONFLICT': 'Conflicting categorization rules need resolution',
             'TRANSFER_REQUIRES_REVIEW': 'Confirm the transfer',
             'READY_TO_MARK_REVIEWED': 'Ready to mark reviewed',
         }
@@ -147,6 +244,14 @@ class TransactionSerializer(serializers.ModelSerializer):
             {'code': reason, 'label': labels[reason]}
             for reason in transaction.review_reasons()
         ]
+
+    def update(self, instance, validated_data):
+        if (
+            instance.categorized_by_rule_id
+            and 'subcategory' in validated_data
+        ):
+            validated_data['categorized_by_rule'] = None
+        return super().update(instance, validated_data)
 
     def validate(self, attrs):
         if self.instance:

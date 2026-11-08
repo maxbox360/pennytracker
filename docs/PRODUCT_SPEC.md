@@ -353,19 +353,21 @@ Other examples:
 `CHICK-FIL-A → Fast Food`  
 `CARROLL ELECTRIC → Electric`
 
-Rules should be visible and editable.
+Rules must be visible, editable, disableable, and deliberately created by the user. The initial supported condition is **Expense + raw description contains a match value**; merchant matching is deferred until imports reliably populate clean merchant names. The model keeps generic match-field and match-type values for a later concrete need, but unsupported modes are rejected now.
 
-Potential rule matching might support:
+Matching trims outer whitespace, collapses internal whitespace runs, and compares case-insensitively. It does not strip punctuation, tokenize descriptions, or fuzzy-match. The same normalization is used for matching and duplicate-rule validation.
 
-- Description contains
-- Merchant contains
-- Exact merchant match
+Categorization rules assign a subcategory only. They never infer or change financial classification. Rules are classification-scoped, so an Expense rule does not categorize an UNKNOWN, INCOME, REFUND, TRANSFER, or EXCLUDED transaction. For example, an Expense rule matching `POPEYES` can categorize `POPEYES 13171`, but must not categorize `Roundup *Popeyes 13171` classified UNKNOWN or TRANSFER.
 
-Start simple.
+The Review editor may offer “Remember this for future matching expenses,” but the user must opt in and inspect/edit the exact match value before the rule is saved. The default proposed value is the full raw description; PennyTracker does not guess a shorter merchant token.
 
-Do **not** build an AI or machine-learning categorization engine for version 1.
+Rules apply during import preview and confirmation. A single matching rule assigns its active Needs/Wants target and snapshots the target's current bucket. Multiple matching rules with the same target may assign it; the lowest-ID match is stored only as representative provenance. Multiple matching rules with different targets assign nothing and require Review. Preview identifies conflicting rules/categories before confirmation. Confirmation recomputes the decision server-side.
 
-Transparency is more important than sophistication.
+Creating or editing a rule never silently recategorizes existing transactions. The user may explicitly apply a rule to currently pending, uncategorized matching Expenses; this operation searches the full ledger, skips conflicts and existing category assignments, preserves unrelated Review blockers, and is atomic. Clean auto-categorized imports may become `NOT_REQUIRED`, not `REVIEWED`; possible duplicates remain `PENDING`.
+
+Automatic assignments retain the rule ID as lightweight provenance, not a live rule or condition snapshot. A manual category edit clears that reference and wins for that transaction. Rule edits, disabling, and removal do not change a transaction's stored subcategory or historical bucket snapshot. Rules with historical provenance references are disabled rather than deleted.
+
+Archived or Expense-incompatible target subcategories make a rule unusable without deleting or reactivating either object. Rules remain visible with a warning; reactivating an archived target or moving it back to Needs/Wants makes the rule usable again. Rules remain deterministic and do not use AI or machine learning.
 
 ---
 
@@ -1585,6 +1587,9 @@ The following decisions refine and take precedence over earlier tentative option
 - **Ambiguous deposits:** A generic source type such as `DEPOSIT` is not evidence of Income. Keep it `UNKNOWN` unless the user or a transparent categorization rule resolves it.
 - **Future transfer reporting:** Savings contributions and withdrawals may later be derived from transfer direction rather than separate classifications. When both sides of one internal transfer are imported, future matching should recognize the pair as one economic transfer and avoid double-counting. Transfer pairing and Savings calculations are not part of Milestone 3.6.
 - **Milestone 3.6 scope:** Neutralize dark-mode surfaces, add API-backed shared sorting/filtering and pagination to Transactions and Review, and lock in the owned-account transfer/ambiguous-deposit rules. Do not add categorization rules, transfer pairing, savings calculations, or reporting.
+- **Categorization rules:** Initial rules support only `EXPENSE + raw description contains`. Trim and collapse whitespace and compare case-insensitively without punctuation rewriting or fuzzy matching. Rules assign categories, never financial classifications. Rule conflicts with different targets go to Review; same-target matches may categorize, with one matching rule retained only as representative provenance. The Review opt-in shows the exact editable match value before saving. Rule application never silently rewrites existing assignments, and manual category edits clear automatic-rule provenance.
+- **Milestone 4 scope:** Transparent categorization rules, import preview/confirmation application, explicit Review-created rules and pending-match application, Rules navigation/management, and rule provenance/conflict explanations. Archived targets remain visible but unusable. Do not add merchant matching, reporting/accounting calculations, transfer pairing, savings calculations, debt, or recurring expenses.
+- **Roadmap sequence:** Milestone 5 is accounting calculations and monthly reporting; Milestone 6 is historical/year/all-time reporting. These remain later work and are not started as part of Milestone 4.
 
 # Final development philosophy
 

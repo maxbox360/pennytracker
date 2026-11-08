@@ -59,7 +59,18 @@ Implement one milestone at a time; keep the application runnable and verify each
 - Document future direction-derived Savings contributions/withdrawals and two-sided transfer pairing without implementing pairing, savings calculations, or reports.
 - Verified with 54 Django tests, frontend TypeScript/production build, no pending migrations, and the running Docker Compose paginated API/frontend smoke checks.
 
-## Milestone 4 — Accounting and monthly reporting
+## Milestone 4 — Transparent categorization rules
+
+- Add visible, editable, disableable categorization rules scoped to `EXPENSE`; the initial match is raw description contains only.
+- Normalize matching values by trimming, collapsing whitespace, and case-folding. Do not strip punctuation, tokenize, or fuzzy-match.
+- Apply usable rules after overlap detection in import preview and recompute during confirmation. Snapshot the target Subcategory's current bucket and retain lightweight rule provenance.
+- Never infer financial classification. Same-target matches may categorize, with the lowest-ID match retained only as representative provenance; conflicting targets remain uncategorized and require Review with the conflict shown in preview and Review reasons.
+- Offer deliberate Review opt-in with an editable exact match value. Add a Rules screen for CRUD, archived-target warnings, enable/disable, and safe removal.
+- Offer explicit server-side application to matching pending uncategorized Expenses across all pages. Never overwrite assigned categories or clear unrelated blockers; recompute review status and apply atomically.
+- Manual category edits clear rule provenance. Rule edits, disabling, and removal do not rewrite historical assignments or bucket snapshots.
+- Do not add merchant matching, accounting/reporting calculations, transfer pairing, savings calculations, debts, recurring expenses, or other later features.
+
+## Milestone 5 — Accounting calculations and monthly reporting
 
 - Implement and test income, Needs/Wants expenses, linked refunds, credit-card payments, internal transfers, qualifying savings transfers, and exclusions.
 - Use posted date when available, otherwise transaction date. Count savings transfers once on the source-side posted date when available.
@@ -67,7 +78,7 @@ Implement one milestone at a time; keep the application runnable and verify each
 - Snapshot configurable monthly allocation targets and applicable subcategory budgets when each month becomes relevant; no rollover or pre-created future months.
 - Build the monthly dashboard around target-versus-actual bars and auditable drill-downs.
 
-## Milestone 5 — Historical reporting and export
+## Milestone 6 — Historical reporting and export
 
 - Add All Time and calendar-year views, year-over-year comparisons, subcategory breakdowns, and spending/savings trends across months and years.
 - Keep all reporting periods independent of imports and drill from every aggregate to the contributing transactions using historical bucket snapshots.

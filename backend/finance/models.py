@@ -32,6 +32,16 @@ class DuplicateResolution(models.TextChoices):
     CONFIRMED_DUPLICATE = 'CONFIRMED_DUPLICATE', 'Confirmed duplicate'
 
 
+class RuleMatchField(models.TextChoices):
+    RAW_DESCRIPTION = 'RAW_DESCRIPTION', 'Raw description'
+    MERCHANT = 'MERCHANT', 'Merchant'
+
+
+class RuleMatchType(models.TextChoices):
+    CONTAINS = 'CONTAINS', 'Contains'
+    EQUALS = 'EQUALS', 'Equals'
+
+
 class Account(models.Model):
     class Type(models.TextChoices):
         CHECKING = 'CHECKING', 'Checking'
@@ -103,6 +113,54 @@ class Subcategory(models.Model):
         return self.name
 
 
+class CategorizationRule(models.Model):
+    name = models.CharField(max_length=100, blank=True)
+    match_field = models.CharField(
+        max_length=30,
+        choices=RuleMatchField.choices,
+        default=RuleMatchField.RAW_DESCRIPTION,
+    )
+    match_type = models.CharField(
+        max_length=10,
+        choices=RuleMatchType.choices,
+        default=RuleMatchType.CONTAINS,
+    )
+    match_value = models.CharField(max_length=200)
+    classification = models.CharField(
+        max_length=10,
+        choices=TransactionClassification.choices,
+        default=TransactionClassification.EXPENSE,
+    )
+    subcategory = models.ForeignKey(
+        Subcategory,
+        on_delete=models.PROTECT,
+        related_name='categorization_rules',
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['id']
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(match_field__in=RuleMatchField.values),
+                name='valid_rule_match_field',
+            ),
+            models.CheckConstraint(
+                condition=Q(match_type__in=RuleMatchType.values),
+                name='valid_rule_match_type',
+            ),
+            models.CheckConstraint(
+                condition=Q(classification__in=TransactionClassification.values),
+                name='valid_rule_classification',
+            ),
+        ]
+
+    def __str__(self):
+        return self.name.strip() or f'{self.classification} description contains "{self.match_value}"'
+
+
 class Transaction(models.Model):
     Classification = TransactionClassification
     ReviewStatus = ReviewStatus
@@ -116,6 +174,14 @@ class Transaction(models.Model):
         null=True,
         blank=True,
     )
+    categorized_by_rule = models.ForeignKey(
+        CategorizationRule,
+        on_delete=models.PROTECT,
+        related_name='categorized_transactions',
+        null=True,
+        blank=True,
+    )
+    categorization_rule_conflict = models.BooleanField(default=False)
     date = models.DateField()
     posted_date = models.DateField(null=True, blank=True)
     raw_description = models.TextField()
@@ -203,6 +269,8 @@ class Transaction(models.Model):
         blockers = []
         if self.duplicate_resolution == DuplicateResolution.UNRESOLVED:
             blockers.append('UNRESOLVED_DUPLICATE')
+        if self.categorization_rule_conflict:
+            blockers.append('RULE_CONFLICT')
         if self.classification == TransactionClassification.UNKNOWN:
             blockers.append('UNKNOWN_CLASSIFICATION')
         if self.classification in (
@@ -239,11 +307,20 @@ class Transaction(models.Model):
             previous = type(self).objects.filter(pk=self.pk).values(
                 'classification',
                 'subcategory_id',
+                'categorized_by_rule_id',
                 'review_status',
             ).first()
 
         classification_changed = previous is not None and previous['classification'] != self.classification
         subcategory_changed = previous is None or previous['subcategory_id'] != self.subcategory_id
+        if previous is not None and (
+            classification_changed or subcategory_changed
+        ) and self.categorized_by_rule_id == previous['categorized_by_rule_id']:
+            self.categorized_by_rule = None
+            changed_fields.add('categorized_by_rule')
+        if self.categorization_rule_conflict and (self.subcategory_id or classification_changed):
+            self.categorization_rule_conflict = False
+            changed_fields.add('categorization_rule_conflict')
         if self.subcategory_id:
             eligible_buckets = self.eligible_buckets(self.classification)
             if self.subcategory.budget_bucket not in eligible_buckets:

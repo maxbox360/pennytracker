@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from django.db import IntegrityError, transaction
 
+from .categorization_rules import evaluate_import_rows
 from .models import (
     Account,
     DuplicateResolution,
@@ -133,7 +134,7 @@ def commit_import(account: Account, filename: str, content: bytes, parsed: Parse
     digest = file_hash(content)
     try:
         with transaction.atomic():
-            rows = overlap_results(account, parsed.rows)
+            rows = evaluate_import_rows(overlap_results(account, parsed.rows))
             imported_rows = [
                 row for row in rows if row['overlap_status'] != 'ALREADY_REPRESENTED'
             ]
@@ -166,14 +167,33 @@ def commit_import(account: Account, filename: str, content: bytes, parsed: Parse
                     amount=row['amount'],
                     source_type=row['source_type'],
                     classification=row['classification'],
+                    subcategory_id=(
+                        row['_categorization']['subcategory'].pk
+                        if row['_categorization']['subcategory'] else None
+                    ),
+                    budget_bucket=(
+                        row['_categorization']['subcategory'].budget_bucket
+                        if row['_categorization']['subcategory'] else ''
+                    ),
+                    categorized_by_rule_id=(
+                        row['_categorization']['rule'].pk
+                        if row['_categorization']['rule'] else None
+                    ),
+                    categorization_rule_conflict=row['_categorization']['conflict'],
                     review_status=(
                         ReviewStatus.PENDING
                         if row['overlap_status'] == 'POSSIBLE_DUPLICATE'
                         or row['classification'] in (
                             TransactionClassification.UNKNOWN,
-                            TransactionClassification.EXPENSE,
                             TransactionClassification.REFUND,
                             TransactionClassification.TRANSFER,
+                        )
+                        or (
+                            row['classification'] == TransactionClassification.EXPENSE
+                            and (
+                                not row['_categorization']['subcategory']
+                                or row['_categorization']['conflict']
+                            )
                         )
                         else ReviewStatus.NOT_REQUIRED
                     ),

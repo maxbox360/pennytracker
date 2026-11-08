@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { apiFetch } from './api'
 import TransactionTable from './TransactionTable'
 import Categories from './Categories'
+import Rules from './Rules'
 import './App.css'
 
 type Account = { id: number; name: string; is_active: boolean }
@@ -26,6 +27,11 @@ type Preview = {
     classification: Classification
     overlap_status: 'NEW' | 'ALREADY_REPRESENTED' | 'POSSIBLE_DUPLICATE'
     overlap_reason: string
+    categorization: {
+      status: 'AUTO_CATEGORIZED' | 'RULE_CONFLICT' | 'NOT_CATEGORIZED'
+      subcategory: { id: number; name: string; budget_bucket: 'NEEDS' | 'WANTS' } | null
+      rules: { id: number; match_value: string; subcategory_name: string }[]
+    }
     duplicate_candidates: {
       id: number
       date: string
@@ -68,7 +74,7 @@ function formatAmount(amount: string) {
 
 function App() {
   const [reload, setReload] = useState(0)
-  const [view, setView] = useState<'transactions' | 'review' | 'categories'>('transactions')
+  const [view, setView] = useState<'transactions' | 'review' | 'categories' | 'rules'>('transactions')
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem('pennytracker-theme')
     return saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system'
@@ -161,6 +167,14 @@ function App() {
           >
             Categories
           </button>
+          <button
+            className={`nav-item ${view === 'rules' ? 'nav-item--active' : ''}`}
+            type="button"
+            aria-current={view === 'rules' ? 'page' : undefined}
+            onClick={() => setView('rules')}
+          >
+            Rules
+          </button>
         </nav>
         <div className="sidebar-footer">
           <label className="theme-control">
@@ -178,16 +192,18 @@ function App() {
       <main className="main-content">
         <header className="page-header">
           <div>
-            <h1>{view === 'review' ? 'Review' : view === 'categories' ? 'Categories' : 'Transactions'}</h1>
+            <h1>{view === 'review' ? 'Review' : view === 'categories' ? 'Categories' : view === 'rules' ? 'Rules' : 'Transactions'}</h1>
             <p className="page-description">
               {view === 'review'
                 ? 'Resolve unknown classifications, uncategorized activity, and possible duplicates.'
                 : view === 'categories'
                   ? 'Manage the subcategories used to organize transactions.'
-                  : 'A clear view of activity across your accounts.'}
+                  : view === 'rules'
+                    ? 'Manage the deterministic rules used to categorize future expenses.'
+                    : 'A clear view of activity across your accounts.'}
             </p>
           </div>
-          {view !== 'categories' && (
+          {view !== 'categories' && view !== 'rules' && (
             <div className="page-actions">
               <button className="secondary-button" type="button" onClick={() => setReload((current) => current + 1)}>
                 Refresh
@@ -311,6 +327,19 @@ function App() {
                                   ).join(' | ')}
                                 </small>
                               )}
+                              {row.categorization.status === 'AUTO_CATEGORIZED' && row.categorization.subcategory && (
+                                <small className="categorization-preview">
+                                  Auto-categorized: {row.categorization.subcategory.name} ·
+                                  {' '}{row.categorization.subcategory.budget_bucket === 'NEEDS' ? 'Needs' : 'Wants'}
+                                  {' '}({row.categorization.rules.length} matching rule{row.categorization.rules.length === 1 ? '' : 's'})
+                                </small>
+                              )}
+                              {row.categorization.status === 'RULE_CONFLICT' && (
+                                <small className="categorization-conflict">
+                                  Rule conflict — requires Review:
+                                  {' '}{[...new Set(row.categorization.rules.map((rule) => rule.subcategory_name))].join(', ')}
+                                </small>
+                              )}
                             </td>
                             <td className={`amount-cell ${row.amount.startsWith('-') ? 'amount-negative' : 'amount-positive'}`}>
                               {formatAmount(row.amount)}
@@ -350,7 +379,9 @@ function App() {
 
         {view === 'categories'
           ? <Categories />
-          : <TransactionTable mode={view} reload={reload} />}
+          : view === 'rules'
+            ? <Rules reload={reload} onChanged={() => setReload((current) => current + 1)} />
+            : <TransactionTable mode={view} reload={reload} />}
       </main>
     </div>
   )
