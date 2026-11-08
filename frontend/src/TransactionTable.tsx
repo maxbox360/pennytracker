@@ -41,6 +41,7 @@ type Transaction = {
 
 type Props = { mode: 'transactions' | 'review'; reload: number }
 type Draft = { classification: Classification; subcategory: string; merchant: string; notes: string }
+type SortField = 'date' | 'description' | 'account' | 'source_type' | 'classification' | 'subcategory' | 'review_status' | 'amount'
 
 const classifications: Classification[] = [
   'UNKNOWN',
@@ -83,16 +84,37 @@ function acceptsBucket(classification: Classification, bucket: Bucket) {
     : classification === 'TRANSFER' && bucket === 'SAVINGS'
 }
 
+function eligibleBuckets(classification: Classification): Bucket[] {
+  if (classification === 'EXPENSE' || classification === 'REFUND') return ['NEEDS', 'WANTS']
+  if (classification === 'TRANSFER') return ['SAVINGS']
+  return []
+}
+
 export default function TransactionTable({ mode, reload }: Props) {
   const [transactions, setTransactions] = useState<Transaction[]>([])
+  const [totalCount, setTotalCount] = useState(0)
+  const [hasPreviousPage, setHasPreviousPage] = useState(false)
+  const [hasNextPage, setHasNextPage] = useState(false)
+  const [page, setPage] = useState(1)
+  const [sort, setSort] = useState<{ field: SortField; direction: 'asc' | 'desc' }>({
+    field: 'date',
+    direction: 'desc',
+  })
   const [accounts, setAccounts] = useState<Account[]>([])
   const [subcategories, setSubcategories] = useState<Subcategory[]>([])
+  const [allSubcategories, setAllSubcategories] = useState<Subcategory[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [localReload, setLocalReload] = useState(0)
   const [accountFilter, setAccountFilter] = useState('')
   const [classificationFilter, setClassificationFilter] = useState('')
+  const [sourceTypeFilter, setSourceTypeFilter] = useState('')
+  const [subcategoryFilter, setSubcategoryFilter] = useState('')
+  const [bucketFilter, setBucketFilter] = useState('')
+  const [reviewStatusFilter, setReviewStatusFilter] = useState(
+    mode === 'review' ? 'PENDING' : '',
+  )
   const [reasonFilter, setReasonFilter] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
@@ -104,20 +126,26 @@ export default function TransactionTable({ mode, reload }: Props) {
   const [bulkSubcategory, setBulkSubcategory] = useState('')
 
   useEffect(() => {
+    setReviewStatusFilter(mode === 'review' ? 'PENDING' : '')
+    setPage(1)
+  }, [mode])
+
+  useEffect(() => {
     let active = true
     Promise.all([
       apiFetch('/api/accounts/').then(async (response) => {
         if (!response.ok) throw new Error(`Account request failed (${response.status})`)
         return response.json() as Promise<Account[]>
       }),
-      apiFetch('/api/subcategories/?is_active=true').then(async (response) => {
+      apiFetch('/api/subcategories/').then(async (response) => {
         if (!response.ok) throw new Error(`Subcategory request failed (${response.status})`)
         return response.json() as Promise<Subcategory[]>
       }),
     ]).then(([accountResult, subcategoryResult]) => {
       if (active) {
-        setAccounts(accountResult.filter((account) => account.is_active))
+        setAccounts(accountResult)
         setSubcategories(subcategoryResult.filter((subcategory) => subcategory.is_active))
+        setAllSubcategories(subcategoryResult)
       }
     }).catch((loadError: unknown) => {
       if (active) setError(loadError instanceof Error ? loadError.message : 'Unable to load edit options')
@@ -128,15 +156,18 @@ export default function TransactionTable({ mode, reload }: Props) {
   useEffect(() => {
     let active = true
     const params = new URLSearchParams()
-    if (mode === 'review') params.set('review_status', 'PENDING')
     if (accountFilter) params.set('account', accountFilter)
+    if (classificationFilter) params.set('classification', classificationFilter)
+    if (sourceTypeFilter.trim()) params.set('source_type', sourceTypeFilter.trim())
+    if (subcategoryFilter) params.set('subcategory', subcategoryFilter)
+    if (bucketFilter) params.set('budget_bucket', bucketFilter)
+    if (reviewStatusFilter) params.set('review_status', reviewStatusFilter)
     if (startDate) params.set('start_date', startDate)
     if (endDate) params.set('end_date', endDate)
     if (search.trim()) params.set('search', search.trim())
-    if (mode === 'transactions' && classificationFilter) {
-      params.set('classification', classificationFilter)
-    }
     if (mode === 'review' && reasonFilter) params.set('review_reason', reasonFilter)
+    params.set('ordering', `${sort.direction === 'desc' ? '-' : ''}${sort.field}`)
+    params.set('page', String(page))
 
     setLoading(true)
     setError('')
@@ -144,7 +175,12 @@ export default function TransactionTable({ mode, reload }: Props) {
       .then(async (response) => {
         const result = await response.json()
         if (!response.ok) throw new Error(errorText(result.detail ?? result) || `Request failed (${response.status})`)
-        if (active) setTransactions(result as Transaction[])
+        if (active) {
+          setTransactions(result.results as Transaction[])
+          setTotalCount(result.count as number)
+          setHasPreviousPage(Boolean(result.previous))
+          setHasNextPage(Boolean(result.next))
+        }
       })
       .catch((loadError: unknown) => {
         if (active) setError(loadError instanceof Error ? loadError.message : 'Unable to load transactions')
@@ -152,9 +188,29 @@ export default function TransactionTable({ mode, reload }: Props) {
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [
-    mode, reload, localReload, accountFilter, classificationFilter,
-    reasonFilter, startDate, endDate, search,
+    mode, reload, localReload, accountFilter, classificationFilter, sourceTypeFilter,
+    subcategoryFilter, bucketFilter, reviewStatusFilter, reasonFilter, startDate,
+    endDate, search, sort, page,
   ])
+
+  useEffect(() => {
+    setPage(1)
+  }, [
+    mode, accountFilter, classificationFilter, sourceTypeFilter, subcategoryFilter,
+    bucketFilter, reviewStatusFilter, reasonFilter, startDate, endDate, search, sort,
+  ])
+
+  useEffect(() => {
+    setSelected([])
+    setEditingId(null)
+    setDraft(null)
+  }, [page])
+
+  useEffect(() => {
+    setSelected([])
+    setEditingId(null)
+    setDraft(null)
+  }, [reload])
 
   function refresh() {
     setSelected([])
@@ -236,17 +292,47 @@ export default function TransactionTable({ mode, reload }: Props) {
     }
   }
 
+  async function createSubcategory(
+    id: number,
+    name: string,
+    budget_bucket: Bucket,
+    classification: Classification,
+  ) {
+    const response = await apiFetch(`/api/transactions/${id}/create-subcategory-and-assign/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, budget_bucket, classification }),
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(errorText(result))
+    const created = result.subcategory as Subcategory
+    setSubcategories((current) => [...current, created])
+    setTransactions((current) => current.map((item) => item.id === id ? result.transaction as Transaction : item))
+    setDraft((current) => current ? {
+      ...current,
+      classification: result.transaction.classification,
+      subcategory: String(created.id),
+    } : current)
+    setNotice('Subcategory created and assigned.')
+    return created
+  }
+
   const allVisibleSelected = transactions.length > 0 && transactions.every((item) => selected.includes(item.id))
-  const columnCount = mode === 'review' ? 9 : 8
+  const columnCount = mode === 'review' ? 10 : 9
+
+  function sortBy(field: SortField) {
+    setSort((current) => current.field === field
+      ? { field, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      : { field, direction: field === 'date' ? 'desc' : 'asc' })
+  }
 
   return (
     <section className="ledger-card" aria-labelledby="transaction-table-heading">
       <div className="ledger-heading">
         <div>
           <h2 id="transaction-table-heading">{mode === 'review' ? 'Pending review' : 'All transactions'}</h2>
-          <p>{loading ? 'Loading transactions…' : `${transactions.length} transactions`}</p>
+          <p>{loading ? 'Loading transactions…' : `${totalCount} transactions`}</p>
         </div>
-        <button className="refresh-button" type="button" onClick={refresh} disabled={loading}>Refresh</button>
       </div>
 
       <div className="ledger-filters">
@@ -257,25 +343,58 @@ export default function TransactionTable({ mode, reload }: Props) {
             {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
           </select>
         </label>
-        {mode === 'review' ? (
+        <label>
+          Classification
+          <select value={classificationFilter} onChange={(event) => setClassificationFilter(event.target.value)}>
+            <option value="">All classifications</option>
+            {classifications.map((classification) => (
+              <option key={classification} value={classification}>{classificationLabels[classification]}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Source type
+          <input value={sourceTypeFilter} onChange={(event) => setSourceTypeFilter(event.target.value)} />
+        </label>
+        <label>
+          Subcategory
+          <select value={subcategoryFilter} onChange={(event) => setSubcategoryFilter(event.target.value)}>
+            <option value="">All subcategories</option>
+            <option value="uncategorized">Uncategorized</option>
+            {allSubcategories.map((subcategory) => (
+              <option key={subcategory.id} value={subcategory.id}>
+                {subcategory.name}{subcategory.is_active ? '' : ' (archived)'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Bucket
+          <select value={bucketFilter} onChange={(event) => setBucketFilter(event.target.value)}>
+            <option value="">All buckets</option>
+            {(['NEEDS', 'WANTS', 'SAVINGS'] as Bucket[]).map((value) => (
+              <option key={value} value={value}>{bucketLabels[value]}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Review status
+          <select value={reviewStatusFilter} onChange={(event) => setReviewStatusFilter(event.target.value)}>
+            <option value="">All statuses</option>
+            <option value="PENDING">Pending review</option>
+            <option value="REVIEWED">Reviewed</option>
+            <option value="NOT_REQUIRED">No review needed</option>
+          </select>
+        </label>
+        {mode === 'review' && (
           <label>
             Review reason
             <select value={reasonFilter} onChange={(event) => setReasonFilter(event.target.value)}>
-              <option value="">All pending reasons</option>
+              <option value="">All reasons</option>
               <option value="UNKNOWN">Unknown classification</option>
               <option value="UNCATEGORIZED">Uncategorized expense/refund</option>
               <option value="POSSIBLE_DUPLICATE">Possible duplicate</option>
               <option value="TRANSFER">Transfer</option>
-            </select>
-          </label>
-        ) : (
-          <label>
-            Classification
-            <select value={classificationFilter} onChange={(event) => setClassificationFilter(event.target.value)}>
-              <option value="">All classifications</option>
-              {classifications.map((classification) => (
-                <option key={classification} value={classification}>{classificationLabels[classification]}</option>
-              ))}
             </select>
           </label>
         )}
@@ -334,11 +453,6 @@ export default function TransactionTable({ mode, reload }: Props) {
         <div className="empty-state">
           <h3>{mode === 'review' ? 'Review queue is clear' : 'No transactions found'}</h3>
           <p>{mode === 'review' ? 'Transactions needing attention will appear here.' : 'Try changing the filters or import a CSV.'}</p>
-          {mode === 'transactions' && (
-            <a href="http://127.0.0.1:8000/admin/" target="_blank" rel="noreferrer">
-              Open Django admin
-            </a>
-          )}
         </div>
       ) : (
         <div className="table-scroll">
@@ -355,13 +469,14 @@ export default function TransactionTable({ mode, reload }: Props) {
                     />
                   </th>
                 )}
-                <th scope="col">Date</th>
-                <th scope="col">Description</th>
-                <th scope="col">Account</th>
-                <th scope="col">Source type</th>
-                <th scope="col">Classification</th>
-                <th scope="col">Subcategory / review</th>
-                <th scope="col" className="amount-cell">Amount</th>
+                <SortableHeader label="Date" field="date" sort={sort} onSort={sortBy} />
+                <SortableHeader label="Description" field="description" sort={sort} onSort={sortBy} />
+                <SortableHeader label="Account" field="account" sort={sort} onSort={sortBy} />
+                <SortableHeader label="Source type" field="source_type" sort={sort} onSort={sortBy} />
+                <SortableHeader label="Classification" field="classification" sort={sort} onSort={sortBy} />
+                <SortableHeader label="Subcategory" field="subcategory" sort={sort} onSort={sortBy} />
+                <SortableHeader label="Review" field="review_status" sort={sort} onSort={sortBy} />
+                <SortableHeader label="Amount" field="amount" sort={sort} onSort={sortBy} className="amount-cell" />
                 <th scope="col">Actions</th>
               </tr>
             </thead>
@@ -383,6 +498,8 @@ export default function TransactionTable({ mode, reload }: Props) {
                   onCancel={() => { setEditingId(null); setDraft(null) }}
                   onDraft={(value) => setDraft(value)}
                   onSave={saveEdit}
+                  onCreateSubcategory={createSubcategory}
+                  reviewStatusLabel={reviewStatusLabels[item.review_status]}
                   onMarkReviewed={() => void postAction(`/api/transactions/${item.id}/mark-reviewed/`)}
                   onResolve={(resolution, candidateId) => void postAction(
                     `/api/transactions/${item.id}/resolve-duplicate/`,
@@ -392,9 +509,52 @@ export default function TransactionTable({ mode, reload }: Props) {
               ))}
             </tbody>
           </table>
+          <div className="ledger-pagination" aria-label="Transaction pages">
+            <span>
+              {totalCount === 0 ? '0 transactions' : `${(page - 1) * 100 + 1}–${Math.min(page * 100, totalCount)} of ${totalCount}`}
+            </span>
+            <div>
+              <button type="button" disabled={!hasPreviousPage || loading} onClick={() => setPage((current) => current - 1)}>
+                Previous
+              </button>
+              <span>Page {page} of {Math.max(1, Math.ceil(totalCount / 100))}</span>
+              <button type="button" disabled={!hasNextPage || loading} onClick={() => setPage((current) => current + 1)}>
+                Next
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </section>
+  )
+}
+
+function SortableHeader({
+  label,
+  field,
+  sort,
+  onSort,
+  className = '',
+}: {
+  label: string
+  field: SortField
+  sort: { field: SortField; direction: 'asc' | 'desc' }
+  onSort: (field: SortField) => void
+  className?: string
+}) {
+  const active = sort.field === field
+  const direction = active ? sort.direction : null
+  return (
+    <th scope="col" aria-sort={direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none'} className={className}>
+      <button
+        className="sort-header"
+        type="button"
+        aria-label={`Sort by ${label}${active ? `, currently ${direction}ending` : ''}`}
+        onClick={() => onSort(field)}
+      >
+        {label}<span aria-hidden="true">{direction === 'asc' ? ' ↑' : direction === 'desc' ? ' ↓' : ' ↕'}</span>
+      </button>
+    </th>
   )
 }
 
@@ -411,16 +571,28 @@ type RowProps = {
   onCancel: () => void
   onDraft: (draft: Draft) => void
   onSave: (event: FormEvent) => void
+  onCreateSubcategory: (
+    id: number,
+    name: string,
+    bucket: Bucket,
+    classification: Classification,
+  ) => Promise<Subcategory>
+  reviewStatusLabel: string
   onMarkReviewed: () => void
   onResolve: (resolution: 'DISTINCT' | 'CONFIRMED_DUPLICATE', candidateId?: number) => void
 }
 
 function FragmentRow(props: RowProps) {
-  const { item, mode, columnCount, selected, editing, draft, subcategories } = props
+  const { item, mode, columnCount, selected, editing, draft, subcategories, reviewStatusLabel } = props
   const [candidateId, setCandidateId] = useState<number | ''>(item.duplicate_candidates[0]?.id ?? '')
+  const [createName, setCreateName] = useState('')
+  const [createBucket, setCreateBucket] = useState<Bucket>('NEEDS')
+  const [createError, setCreateError] = useState('')
+  const [creating, setCreating] = useState(false)
   const eligibleSubcategories = draft
     ? subcategories.filter((subcategory) => acceptsBucket(draft.classification, subcategory.budget_bucket))
     : []
+  const assignableBuckets = draft ? eligibleBuckets(draft.classification) : []
 
   return (
     <>
@@ -444,11 +616,13 @@ function FragmentRow(props: RowProps) {
           {item.subcategory_name ? (
             <span>{item.subcategory_name}<small className="bucket-label">{item.budget_bucket && bucketLabels[item.budget_bucket]}</small></span>
           ) : <span className="muted">Uncategorized</span>}
+        </td>
+        <td>
           {mode === 'review' && (
             <small className="review-reasons">{item.review_reasons.map((reason) => reason.label).join(' · ') || item.review_status}</small>
           )}
           {mode === 'transactions' && (
-            <small className="review-reasons">{reviewStatusLabels[item.review_status]}</small>
+            <small className="review-reasons">{reviewStatusLabel}</small>
           )}
           {item.duplicate_resolution === 'DISTINCT' && (
             <small className="review-reasons">Possible duplicate reviewed as distinct</small>
@@ -501,6 +675,64 @@ function FragmentRow(props: RowProps) {
                   ))}
                 </select>
               </label>
+              {mode === 'review' && assignableBuckets.length > 0 && (
+                <details className="inline-category-create">
+                  <summary>+ Create new subcategory</summary>
+                  <div className="inline-category-fields">
+                    <label>
+                      Name
+                      <input
+                        value={createName}
+                        maxLength={100}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') event.preventDefault()
+                        }}
+                        onChange={(event) => setCreateName(event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Bucket
+                      <select
+                        value={assignableBuckets.includes(createBucket) ? createBucket : assignableBuckets[0]}
+                        onChange={(event) => setCreateBucket(event.target.value as Bucket)}
+                      >
+                        {assignableBuckets.map((value) => (
+                          <option key={value} value={value}>{bucketLabels[value]}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={!createName.trim() || creating}
+                      onClick={async () => {
+                        setCreating(true)
+                        setCreateError('')
+                        try {
+                          const validBucket = assignableBuckets.includes(createBucket)
+                            ? createBucket
+                            : assignableBuckets[0]
+                          await props.onCreateSubcategory(
+                            item.id,
+                            createName,
+                            validBucket,
+                            draft.classification,
+                          )
+                          setCreateName('')
+                          setCreateError('')
+                        } catch (createFailure) {
+                          setCreateError(createFailure instanceof Error ? createFailure.message : 'Unable to create subcategory')
+                        } finally {
+                          setCreating(false)
+                        }
+                      }}
+                    >
+                      {creating ? 'Creating…' : 'Create and assign'}
+                    </button>
+                    {createError && <p className="inline-create-error" role="alert">{createError}</p>}
+                  </div>
+                </details>
+              )}
               <label>
                 Clean merchant
                 <input value={draft.merchant} maxLength={200} onChange={(event) => props.onDraft({ ...draft, merchant: event.target.value })} />

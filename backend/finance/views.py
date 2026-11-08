@@ -1,6 +1,7 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, TextField, Value
+from django.db.models.functions import Coalesce, NullIf
 from django.utils.dateparse import parse_date
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -8,6 +9,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet
 from .csv_imports import (
     DuplicateImportError,
@@ -44,15 +46,71 @@ class SubcategoryViewSet(ModelViewSet):
     queryset = Subcategory.objects.all()
     serializer_class = SubcategorySerializer
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        active = self.request.query_params.get('is_active')
+        if active in ('true', 'false'):
+            queryset = queryset.filter(is_active=active == 'true')
+        return queryset
+
+
+class TransactionPagination(PageNumberPagination):
+    page_size = 100
+
 
 class TransactionViewSet(ModelViewSet):
     serializer_class = TransactionSerializer
+    pagination_class = TransactionPagination
+
+    ordering_fields = {
+        'date': 'date',
+        'description': 'description_sort',
+        'account': 'account__name',
+        'source_type': 'source_type',
+        'classification': 'classification',
+        'subcategory': 'subcategory__name',
+        'review_status': 'review_status',
+        'amount': 'amount',
+    }
 
     def destroy(self, request, *args, **kwargs):
         return Response(
             {'detail': 'Transactions are retained for audit; mark one EXCLUDED instead.'},
             status=status.HTTP_405_METHOD_NOT_ALLOWED,
         )
+
+    @action(detail=True, methods=['post'], url_path='create-subcategory-and-assign')
+    def create_subcategory_and_assign(self, request, pk=None):
+        subcategory_serializer = SubcategorySerializer(data={
+            'name': request.data.get('name', ''),
+            'budget_bucket': request.data.get('budget_bucket', ''),
+        })
+        if not subcategory_serializer.is_valid():
+            return Response(subcategory_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                transaction_record = self.get_object()
+                subcategory = subcategory_serializer.save()
+                transaction_data = {'subcategory': subcategory.pk}
+                if 'classification' in request.data:
+                    transaction_data['classification'] = request.data['classification']
+                transaction_serializer = TransactionSerializer(
+                    transaction_record,
+                    data=transaction_data,
+                    partial=True,
+                )
+                transaction_serializer.is_valid(raise_exception=True)
+                transaction_serializer.save()
+        except DjangoValidationError as error:
+            return Response({'detail': error.message_dict}, status=status.HTTP_400_BAD_REQUEST)
+        except ValidationError as error:
+            return Response(error.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'transaction': transaction_serializer.data,
+            'subcategory': SubcategorySerializer(subcategory).data,
+        }, status=status.HTTP_201_CREATED)
 
     def get_queryset(self):
         queryset = (
@@ -71,6 +129,24 @@ class TransactionViewSet(ModelViewSet):
             if classification not in TransactionClassification.values:
                 raise ValidationError({'classification': 'Choose a valid classification.'})
             queryset = queryset.filter(classification=classification)
+
+        source_type = params.get('source_type')
+        if source_type:
+            queryset = queryset.filter(source_type__icontains=source_type.strip())
+
+        subcategory = params.get('subcategory')
+        if subcategory == 'uncategorized':
+            queryset = queryset.filter(subcategory__isnull=True)
+        elif subcategory:
+            if not subcategory.isdecimal():
+                raise ValidationError({'subcategory': 'Use a subcategory ID or "uncategorized".'})
+            queryset = queryset.filter(subcategory_id=subcategory)
+
+        budget_bucket = params.get('budget_bucket')
+        if budget_bucket:
+            if budget_bucket not in ('NEEDS', 'WANTS', 'SAVINGS'):
+                raise ValidationError({'budget_bucket': 'Choose Needs, Wants, or Savings.'})
+            queryset = queryset.filter(budget_bucket=budget_bucket)
 
         account_id = params.get('account')
         if account_id:
@@ -112,7 +188,27 @@ class TransactionViewSet(ModelViewSet):
                 | Q(merchant__icontains=search)
                 | Q(notes__icontains=search)
             )
-        return queryset
+
+        ordering = params.get('ordering', '-date')
+        descending = ordering.startswith('-')
+        field = ordering[1:] if descending else ordering
+        if field not in self.ordering_fields:
+            raise ValidationError({
+                'ordering': f'Choose one of: {", ".join(self.ordering_fields)}; prefix with - for descending.'
+            })
+        if field == 'description':
+            queryset = queryset.annotate(
+                description_sort=Coalesce(
+                    NullIf('merchant', Value('')),
+                    'raw_description',
+                    output_field=TextField(),
+                )
+            )
+        order_expression = self.ordering_fields[field]
+        if descending:
+            order_expression = f'-{order_expression}'
+        tie_breaker = '-id' if descending else 'id'
+        return queryset.order_by(order_expression, tie_breaker)
 
     @action(detail=True, methods=['post'], url_path='mark-reviewed')
     def mark_reviewed(self, request, pk=None):

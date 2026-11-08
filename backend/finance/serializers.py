@@ -47,6 +47,27 @@ class SubcategorySerializer(serializers.ModelSerializer):
         model = Subcategory
         fields = ('id', 'name', 'budget_bucket', 'is_active')
 
+    def validate_name(self, value):
+        normalized_name = value.strip().casefold()
+        duplicates = Subcategory.objects.exclude(pk=self.instance.pk) if self.instance else Subcategory.objects.all()
+        existing = next(
+            (subcategory for subcategory in duplicates if subcategory.name.strip().casefold() == normalized_name),
+            None,
+        )
+        if existing:
+            if not existing.is_active:
+                message = (
+                    f'The subcategory “{existing.name}” is archived. '
+                    'Reactivate it from Categories instead of creating a duplicate.'
+                )
+            else:
+                message = (
+                    f'An active subcategory named “{existing.name}” already exists. '
+                    'Select it from the subcategory list instead of creating a duplicate.'
+                )
+            raise serializers.ValidationError(message)
+        return value.strip()
+
 
 class DuplicateCandidateSerializer(serializers.ModelSerializer):
     account_name = serializers.CharField(source='account.name', read_only=True)

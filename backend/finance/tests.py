@@ -6,6 +6,7 @@ from decimal import Decimal
 from django.test import Client, TestCase
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, transaction
 from rest_framework.test import APITestCase
 
 from .csv_imports import (
@@ -32,6 +33,12 @@ from .models import (
 class TransactionModelTests(TestCase):
     def setUp(self):
         self.account = Account.objects.create(name='Checking')
+
+    def test_active_subcategory_names_are_case_insensitively_unique_in_database(self):
+        Subcategory.objects.create(name='Fast Food', budget_bucket=BudgetBucket.WANTS)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Subcategory.objects.create(name=' fast food ', budget_bucket=BudgetBucket.NEEDS)
 
     def test_expense_can_be_uncategorized_and_unknown_is_not_review_state(self):
         transaction = Transaction.objects.create(
@@ -199,6 +206,164 @@ class LedgerApiTests(APITestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn('budget_bucket', response.data)
+
+    def test_subcategory_names_are_case_insensitively_unique_and_archived_names_can_be_reactivated(self):
+        response = self.client.post(
+            '/api/subcategories/',
+            {'name': '  Fast Food  ', 'budget_bucket': BudgetBucket.WANTS},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['name'], 'Fast Food')
+
+        duplicate = self.client.post(
+            '/api/subcategories/',
+            {'name': 'FAST FOOD', 'budget_bucket': BudgetBucket.NEEDS},
+            format='json',
+        )
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn('already exists', str(duplicate.data['name']))
+        self.assertEqual(Subcategory.objects.count(), 2)
+
+        existing = Subcategory.objects.get(name='Fast Food')
+        archived = self.client.patch(
+            f'/api/subcategories/{existing.id}/',
+            {'is_active': False},
+            format='json',
+        )
+        self.assertEqual(archived.status_code, 200)
+        self.assertFalse(archived.data['is_active'])
+        archived_duplicate = self.client.post(
+            '/api/subcategories/',
+            {'name': 'fast food', 'budget_bucket': BudgetBucket.WANTS},
+            format='json',
+        )
+        self.assertEqual(archived_duplicate.status_code, 400)
+        self.assertIn('archived', str(archived_duplicate.data['name']))
+
+        reactivated = self.client.patch(
+            f'/api/subcategories/{existing.id}/',
+            {'is_active': True},
+            format='json',
+        )
+        self.assertEqual(reactivated.status_code, 200)
+        self.assertTrue(reactivated.data['is_active'])
+        self.assertEqual(Subcategory.objects.filter(name__iexact='fast food').count(), 1)
+
+    def test_category_moves_preserve_existing_transaction_bucket_snapshots(self):
+        category = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
+        existing = Transaction.objects.create(
+            account=self.account,
+            subcategory=category,
+            date=date(2026, 1, 15),
+            raw_description='Restaurant',
+            amount=Decimal('-20.00'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+
+        moved = self.client.patch(
+            f'/api/subcategories/{category.id}/',
+            {'name': 'Dining Out', 'budget_bucket': BudgetBucket.NEEDS},
+            format='json',
+        )
+        self.assertEqual(moved.status_code, 200)
+        self.assertEqual(moved.data['name'], 'Dining Out')
+        existing.refresh_from_db()
+        self.assertEqual(existing.budget_bucket, BudgetBucket.WANTS)
+
+        future = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 16),
+            raw_description='Future restaurant',
+            amount=Decimal('-15.00'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+        assigned = self.client.patch(
+            f'/api/transactions/{future.id}/',
+            {'subcategory': category.id},
+            format='json',
+        )
+        self.assertEqual(assigned.status_code, 200)
+        self.assertEqual(assigned.data['budget_bucket'], BudgetBucket.NEEDS)
+
+    def test_archived_subcategories_cannot_be_assigned_to_new_transactions(self):
+        archived = Subcategory.objects.create(
+            name='Old category',
+            budget_bucket=BudgetBucket.NEEDS,
+            is_active=False,
+        )
+        transaction = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Grocery store',
+            amount=Decimal('-10.00'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+
+        response = self.client.patch(
+            f'/api/transactions/{transaction.id}/',
+            {'subcategory': archived.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        transaction.refresh_from_db()
+        self.assertIsNone(transaction.subcategory)
+
+    def test_create_and_assign_subcategory_is_atomic_and_snapshots_current_bucket(self):
+        transaction = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='Restaurant',
+            amount=Decimal('-12.00'),
+            classification=Transaction.Classification.EXPENSE,
+        )
+        response = self.client.post(
+            f'/api/transactions/{transaction.id}/create-subcategory-and-assign/',
+            {'name': 'Fast Food', 'budget_bucket': BudgetBucket.WANTS},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['subcategory']['name'], 'Fast Food')
+        self.assertEqual(response.data['transaction']['budget_bucket'], BudgetBucket.WANTS)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.subcategory.name, 'Fast Food')
+
+        draft_classification = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 16),
+            raw_description='Unreviewed restaurant',
+            amount=Decimal('-8.00'),
+            classification=Transaction.Classification.UNKNOWN,
+        )
+        response = self.client.post(
+            f'/api/transactions/{draft_classification.id}/create-subcategory-and-assign/',
+            {
+                'name': 'Cafe',
+                'budget_bucket': BudgetBucket.NEEDS,
+                'classification': Transaction.Classification.EXPENSE,
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['transaction']['classification'], Transaction.Classification.EXPENSE)
+        self.assertEqual(response.data['transaction']['budget_bucket'], BudgetBucket.NEEDS)
+
+        invalid = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 17),
+            raw_description='Unknown transaction',
+            amount=Decimal('-5.00'),
+            classification=Transaction.Classification.UNKNOWN,
+        )
+        response = self.client.post(
+            f'/api/transactions/{invalid.id}/create-subcategory-and-assign/',
+            {'name': 'Must Roll Back', 'budget_bucket': BudgetBucket.NEEDS},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Subcategory.objects.filter(name='Must Roll Back').exists())
+        invalid.refresh_from_db()
+        self.assertIsNone(invalid.subcategory)
 
     def test_income_and_transfer_category_eligibility(self):
         response = self.client.post(
@@ -407,9 +572,119 @@ class LedgerApiTests(APITestCase):
         )
         response = self.client.get('/api/transactions/?review_status=PENDING&review_reason=UNKNOWN')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item['id'] for item in response.data], [unknown.id])
+        self.assertEqual([item['id'] for item in response.data['results']], [unknown.id])
         response = self.client.get('/api/transactions/?start_date=bad-date')
         self.assertEqual(response.status_code, 400)
+
+    def test_transaction_api_orders_and_filters_server_side(self):
+        wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
+        other_account = Account.objects.create(name='Savings')
+        older = Transaction.objects.create(
+            account=self.account,
+            subcategory=self.needs,
+            date=date(2026, 1, 10),
+            raw_description='Grocery market',
+            merchant='Market',
+            amount=Decimal('-20.00'),
+            source_type='DEBIT_CARD',
+            classification=Transaction.Classification.EXPENSE,
+        )
+        newer = Transaction.objects.create(
+            account=other_account,
+            subcategory=wants,
+            date=date(2026, 1, 20),
+            raw_description='Restaurant',
+            merchant='Cafe',
+            amount=Decimal('-8.00'),
+            source_type='CARD',
+            classification=Transaction.Classification.EXPENSE,
+        )
+        unknown = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 25),
+            raw_description='From Emergency Fund Vault',
+            amount=Decimal('500.00'),
+            source_type='DEPOSIT',
+            classification=Transaction.Classification.UNKNOWN,
+        )
+
+        response = self.client.get('/api/transactions/?ordering=date')
+        self.assertEqual([item['id'] for item in response.data['results']], [older.id, newer.id, unknown.id])
+        response = self.client.get('/api/transactions/?ordering=-amount')
+        self.assertEqual([item['id'] for item in response.data['results']], [unknown.id, newer.id, older.id])
+        for ordering in (
+            'date', '-date', 'description', '-description', 'account', '-account',
+            'source_type', '-source_type', 'classification', '-classification',
+            'subcategory', '-subcategory', 'review_status', '-review_status', 'amount',
+        ):
+            with self.subTest(ordering=ordering):
+                self.assertEqual(
+                    self.client.get(f'/api/transactions/?ordering={ordering}').status_code,
+                    200,
+                )
+        response = self.client.get('/api/transactions/?search=market&source_type=debit&account=%d' % self.account.id)
+        self.assertEqual([item['id'] for item in response.data['results']], [older.id])
+        response = self.client.get(f'/api/transactions/?subcategory={wants.id}&budget_bucket=WANTS')
+        self.assertEqual([item['id'] for item in response.data['results']], [newer.id])
+        response = self.client.get('/api/transactions/?subcategory=uncategorized&classification=UNKNOWN')
+        self.assertEqual([item['id'] for item in response.data['results']], [unknown.id])
+
+    def test_transaction_api_validates_ordering_and_filter_values(self):
+        for query in (
+            '?ordering=raw_description',
+            '?subcategory=all',
+            '?budget_bucket=OTHER',
+            '?review_status=UNSEEN',
+        ):
+            with self.subTest(query=query):
+                response = self.client.get(f'/api/transactions/{query}')
+                self.assertEqual(response.status_code, 400)
+
+    def test_transaction_api_paginates_with_stable_total_and_navigation(self):
+        Transaction.objects.bulk_create([
+            Transaction(
+                account=self.account,
+                date=date(2026, 1, 1),
+                raw_description=f'Transaction {index}',
+                amount=Decimal('-1.00'),
+                classification=Transaction.Classification.EXPENSE,
+                subcategory=self.needs,
+                budget_bucket=BudgetBucket.NEEDS,
+            )
+            for index in range(101)
+        ])
+        first_page = self.client.get('/api/transactions/?ordering=date&page=1')
+        second_page = self.client.get('/api/transactions/?ordering=date&page=2')
+
+        self.assertEqual(first_page.data['count'], 101)
+        self.assertEqual(len(first_page.data['results']), 100)
+        self.assertIsNone(first_page.data['previous'])
+        self.assertIsNotNone(first_page.data['next'])
+        self.assertEqual(len(second_page.data['results']), 1)
+        self.assertIsNotNone(second_page.data['previous'])
+        self.assertIsNone(second_page.data['next'])
+
+    def test_unknown_transaction_can_be_changed_to_transfer_and_reviewed_without_category(self):
+        transaction = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 1, 15),
+            raw_description='From Emergency Fund Vault',
+            amount=Decimal('100.00'),
+            classification=Transaction.Classification.UNKNOWN,
+        )
+        classified = self.client.patch(
+            f'/api/transactions/{transaction.id}/',
+            {'classification': 'TRANSFER'},
+            format='json',
+        )
+        self.assertEqual(classified.status_code, 200)
+        self.assertEqual(classified.data['classification'], 'TRANSFER')
+        self.assertIsNone(classified.data['subcategory'])
+        self.assertEqual(classified.data['review_status'], ReviewStatus.PENDING)
+
+        reviewed = self.client.post(f'/api/transactions/{transaction.id}/mark-reviewed/')
+        self.assertEqual(reviewed.status_code, 200)
+        self.assertEqual(reviewed.data['review_status'], ReviewStatus.REVIEWED)
 
     def test_transactions_are_retained_instead_of_deleted(self):
         transaction = Transaction.objects.create(
@@ -443,6 +718,13 @@ class CsvImportParserTests(TestCase):
         self.assertEqual(parsed.rows[4]['classification'], 'UNKNOWN')
         self.assertEqual(parsed.rows[5]['classification'], 'UNKNOWN')
         self.assertEqual(parsed.format_identifier, 'sofi-checking-v1')
+
+    def test_generic_deposit_remains_unknown_regardless_of_positive_amount(self):
+        parsed = parse_csv(
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-02-01,From Emergency Fund Vault,DEPOSIT,500.00,Posted\n'
+        )
+        self.assertEqual(parsed.rows[0]['classification'], 'UNKNOWN')
 
     def test_requires_supported_columns_and_strict_iso_dates(self):
         with self.assertRaisesRegex(ImportFileError, 'missing required columns'):
@@ -913,3 +1195,24 @@ class CsrfFlowTests(TestCase):
         self.assertEqual(untrusted_origin.status_code, 403)
         self.assertEqual(ImportBatch.objects.count(), 0)
         self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_category_mutations_require_csrf_token(self):
+        body = {'name': 'Groceries', 'budget_bucket': BudgetBucket.NEEDS}
+        rejected = self.client.post(
+            '/api/subcategories/',
+            body,
+            content_type='application/json',
+            HTTP_ORIGIN='http://localhost:5173',
+        )
+        self.assertEqual(rejected.status_code, 403)
+
+        token = self.client.get('/api/csrf/').json()['csrfToken']
+        accepted = self.client.post(
+            '/api/subcategories/',
+            body,
+            content_type='application/json',
+            HTTP_ORIGIN='http://localhost:5173',
+            HTTP_X_CSRFTOKEN=token,
+        )
+        self.assertEqual(accepted.status_code, 201)
+        self.assertEqual(Subcategory.objects.count(), 1)

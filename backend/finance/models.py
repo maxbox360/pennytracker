@@ -1,5 +1,6 @@
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Lower, Trim
 from django.core.exceptions import ValidationError
 
 
@@ -90,6 +91,11 @@ class Subcategory(models.Model):
             models.CheckConstraint(
                 condition=Q(budget_bucket__in=BudgetBucket.values),
                 name='valid_subcategory_budget_bucket',
+            ),
+            models.UniqueConstraint(
+                Lower(Trim('name')),
+                condition=Q(is_active=True),
+                name='unique_active_subcategory_name_ci',
             ),
         ]
 

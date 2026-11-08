@@ -40,6 +40,25 @@ Implement one milestone at a time; keep the application runnable and verify each
 - Do not add automatic categorization rules, reporting, refund linking, transfer pairing, savings calculations, debt, recurring bills, or subscriptions.
 - Verified with multiplicity, review-rule, atomic bulk-action, source-immutability, and duplicate-resolution tests; frontend build and Docker Compose API/proxy/CSRF smoke checks pass.
 
+## Milestone 3.5 — Ledger UX, Categories, and themes (complete)
+
+- Refine Transactions and Review into denser ledger tables with grouped page actions, compact status treatments, and a compact transaction editor; keep duplicate controls limited to unresolved possible duplicates.
+- Add Categories management for creating, renaming, moving, archiving, and reactivating Subcategories. Block exact case-insensitive duplicate names, including archived-name collisions that should be resolved by reactivation.
+- Keep archived categories available for history but unavailable for new assignments. Category bucket moves affect future assignments only; preserve existing Transaction bucket snapshots.
+- Add atomic Review create-and-assign so category creation, eligibility validation, assignment, and bucket snapshot roll back together on failure.
+- Add persisted Light, Dark, and System themes using CSS custom properties and synchronous startup initialization; keep the theme preference in browser localStorage.
+- Keep all mutations on the shared CSRF-aware `apiFetch` client. Do not add categorization rules or reporting.
+- Verified with 49 Django tests, frontend TypeScript/production build, no pending migrations, and the running Docker Compose frontend/API smoke check.
+
+## Milestone 3.6 — Ledger query usability and transfer clarifications (complete)
+
+- Replace green-cast Dark/System-dark surfaces with neutral charcoal/slate tokens while keeping green for meaningful accents; leave Light tokens unchanged.
+- Add consistent API-backed sorting and filtering on Transactions and Review for date, description/merchant, account, source type, classification, subcategory/bucket, and review status/reason.
+- Paginate the transaction API and ledger UI so sorting/filtering does not require downloading the whole transaction history.
+- Preserve the rule that owned-account movement is `TRANSFER`, not Income or ordinary spending. Keep generic `DEPOSIT` source rows `UNKNOWN`; a Transfer can be manually reviewed without a Subcategory.
+- Document future direction-derived Savings contributions/withdrawals and two-sided transfer pairing without implementing pairing, savings calculations, or reports.
+- Verified with 54 Django tests, frontend TypeScript/production build, no pending migrations, and the running Docker Compose paginated API/frontend smoke checks.
+
 ## Milestone 4 — Accounting and monthly reporting
 
 - Implement and test income, Needs/Wants expenses, linked refunds, credit-card payments, internal transfers, qualifying savings transfers, and exclusions.

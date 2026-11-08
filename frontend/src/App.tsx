@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { apiFetch } from './api'
 import TransactionTable from './TransactionTable'
+import Categories from './Categories'
 import './App.css'
 
 type Account = { id: number; name: string; is_active: boolean }
@@ -47,6 +48,7 @@ type ImportResult = {
   already_represented_row_count: number
   possible_duplicate_row_count: number
 }
+type Theme = 'light' | 'dark' | 'system'
 
 const classificationLabels: Record<Classification, string> = {
   UNKNOWN: 'Unknown',
@@ -66,7 +68,11 @@ function formatAmount(amount: string) {
 
 function App() {
   const [reload, setReload] = useState(0)
-  const [view, setView] = useState<'transactions' | 'review'>('transactions')
+  const [view, setView] = useState<'transactions' | 'review' | 'categories'>('transactions')
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = localStorage.getItem('pennytracker-theme')
+    return saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system'
+  })
   const [showImport, setShowImport] = useState(false)
   const [accounts, setAccounts] = useState<Account[]>([])
   const [accountId, setAccountId] = useState('')
@@ -75,6 +81,11 @@ function App() {
   const [importResult, setImportResult] = useState<ImportResult | null>(null)
   const [importError, setImportError] = useState('')
   const [importing, setImporting] = useState(false)
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem('pennytracker-theme', theme)
+  }, [theme])
 
   useEffect(() => {
     if (!showImport) return
@@ -132,7 +143,6 @@ function App() {
             aria-current={view === 'transactions' ? 'page' : undefined}
             onClick={() => setView('transactions')}
           >
-            <span className="nav-icon" aria-hidden="true">▤</span>
             Transactions
           </button>
           <button
@@ -141,35 +151,60 @@ function App() {
             aria-current={view === 'review' ? 'page' : undefined}
             onClick={() => setView('review')}
           >
-            <span className="nav-icon" aria-hidden="true">✓</span>
             Review
           </button>
+          <button
+            className={`nav-item ${view === 'categories' ? 'nav-item--active' : ''}`}
+            type="button"
+            aria-current={view === 'categories' ? 'page' : undefined}
+            onClick={() => setView('categories')}
+          >
+            Categories
+          </button>
         </nav>
-        <p className="local-note">Your finances stay on this device.</p>
+        <div className="sidebar-footer">
+          <label className="theme-control">
+            Theme
+            <select aria-label="Theme" value={theme} onChange={(event) => setTheme(event.target.value as Theme)}>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+              <option value="system">System</option>
+            </select>
+          </label>
+          <p className="local-note">Your finances stay on this device.</p>
+        </div>
       </aside>
 
-      <main className="main-content" id={view}>
+      <main className="main-content">
         <header className="page-header">
           <div>
-            <p className="eyebrow">{view === 'review' ? 'REVIEW QUEUE' : 'LEDGER'}</p>
-            <h1>{view === 'review' ? 'Review' : 'Transactions'}</h1>
+            <h1>{view === 'review' ? 'Review' : view === 'categories' ? 'Categories' : 'Transactions'}</h1>
             <p className="page-description">
               {view === 'review'
                 ? 'Resolve unknown classifications, uncategorized activity, and possible duplicates.'
-                : 'A clear view of activity across your accounts.'}
+                : view === 'categories'
+                  ? 'Manage the subcategories used to organize transactions.'
+                  : 'A clear view of activity across your accounts.'}
             </p>
           </div>
-          {view === 'transactions' && (
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => {
-                setShowImport((shown) => !shown)
-                setImportError('')
-              }}
-            >
-              {showImport ? 'Close import' : 'Import CSV'}
-            </button>
+          {view !== 'categories' && (
+            <div className="page-actions">
+              <button className="secondary-button" type="button" onClick={() => setReload((current) => current + 1)}>
+                Refresh
+              </button>
+              {view === 'transactions' && (
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => {
+                    setShowImport((shown) => !shown)
+                    setImportError('')
+                  }}
+                >
+                  {showImport ? 'Close import' : 'Import CSV'}
+                </button>
+              )}
+            </div>
           )}
         </header>
 
@@ -313,7 +348,9 @@ function App() {
           </section>
         )}
 
-        <TransactionTable mode={view} reload={reload} />
+        {view === 'categories'
+          ? <Categories />
+          : <TransactionTable mode={view} reload={reload} />}
       </main>
     </div>
   )

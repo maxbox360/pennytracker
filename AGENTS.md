@@ -192,6 +192,8 @@ Checking → Savings:
 Checking → Checking:
 - Normally exclude from spending and income calculations.
 
+Movement between accounts owned by the user is `TRANSFER` activity, not Income or ordinary spending, regardless of direction. A generic bank source type such as `DEPOSIT` is ambiguous and must remain `UNKNOWN` unless the user or a transparent categorization rule resolves it. Future Savings contributions/withdrawals may be derived from transfer direction; if both sides are imported, they must eventually be paired and counted as one economic transfer.
+
 Avoid double-counting transactions.
 
 The exact transfer model should remain understandable and auditable.
@@ -467,6 +469,10 @@ Avoid Redux unless there is a demonstrated need.
 Keep API interaction centralized enough that request behavior is consistent.
 
 All frontend API mutations must use the shared CSRF-aware `apiFetch` in `frontend/src/api.ts`. Do not use raw `fetch()` for POST, PATCH, PUT, or DELETE requests.
+
+Normal Subcategory creation and management belongs in PennyTracker's UI, not Django admin. Archived Subcategories remain available for historical display but cannot receive new assignments; moving a Subcategory between stable buckets must not change existing Transaction bucket snapshots. Keep the interface dense and ledger-oriented, and support Light, Dark, and System themes through CSS custom properties with the preference stored in browser localStorage.
+
+Use neutral charcoal/slate surfaces in dark mode and reserve PennyTracker green for intentional accents. Transactions and Review sorting/filtering should be API-backed and paginated rather than requiring the full ledger in the browser.
 
 Desktop usage is the priority.
 
