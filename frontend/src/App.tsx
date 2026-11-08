@@ -210,7 +210,7 @@ function App() {
                   : view === 'rules'
                     ? 'Manage the deterministic rules used to categorize future expenses.'
                     : view === 'reports'
-                      ? 'Review monthly income, allocations, Savings activity, and transactions behind every total.'
+                      ? 'Explore All Time, yearly, and monthly accounting with trends and auditable transaction details.'
                     : 'A clear view of activity across your accounts.'}
             </p>
           </div>

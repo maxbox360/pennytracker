@@ -27,6 +27,7 @@
   --chart-wants: #bf8736;
   --chart-savings: #28775c;
   --chart-remaining: #9aa39f;
+  --chart-income: #7772a8;
   --hover: #f1f5f2;
   --focus: #55977a;
   font-synthesis: none;
@@ -69,6 +70,7 @@
   --chart-wants: #e0b05f;
   --chart-savings: #3faf85;
   --chart-remaining: #8c969c;
+  --chart-income: #a9a2df;
   --hover: #202529;
   --focus: #4fc39a;
 }
@@ -102,6 +104,7 @@
     --chart-wants: #e0b05f;
     --chart-savings: #3faf85;
     --chart-remaining: #8c969c;
+    --chart-income: #a9a2df;
     --hover: #202529;
     --focus: #4fc39a;
   }

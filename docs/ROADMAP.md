@@ -81,13 +81,26 @@ Implement one milestone at a time; keep the application runnable and verify each
 - Add a dense monthly Reports screen with month navigation, target/actual/percentage-point comparison, Subcategory breakdowns, completeness warnings, and paginated drilldowns that reconcile exactly to report amounts.
 - Do not add year/All-Time reports, trends, custom ranges, snapshots/effective-dated targets, transfer pairing, linked refunds, or Subcategory budgets.
 
-## Milestone 6 — Historical reporting and export
+## Milestone 6 — Historical reporting (core completion)
 
-- Add All Time and calendar-year views, year-over-year comparisons, subcategory breakdowns, and spending/Savings trends across months and years.
-- Consider effective-dated target history if preserving historical target comparisons becomes a confirmed requirement.
-- Keep all reporting periods independent of imports and drill from every aggregate to the contributing transactions using historical bucket snapshots.
-- Leave custom date ranges straightforward to add later; first deliver All Time, Year, and Month.
-- Add transaction and reporting-data export; consider historical spreadsheet migration separately.
+- Generalize the existing accounting rules once for Monthly, Year, and All Time; preserve Monthly API behavior and accounting parity.
+- Add All Time and calendar-year reports, including all 12 months in a selected year and a continuous All-Time monthly series from the earliest through latest transaction month.
+- Aggregate totals, periods, ranked subcategories, trends, completeness, and paginated drilldowns in the database where practical; retain Decimal/signed accounting behavior.
+- Preserve historical bucket snapshots when grouping category history. Rank subcategories by signed net Expense/Refund contribution, including negative totals.
+- Use aggregate-period ratios for percentages and current allocation targets as clearly labeled reference lines, not historical targets.
+- Keep incomplete periods and distinguish them from truly empty and known-zero periods. Provide auditable drilldowns at All Time, Year, and Month levels.
+- Make Reports default to All Time with All Time → Year → Month navigation. Use separate native-SVG dollar and percentage charts with accompanying value tables.
+- Do not add a migration. If a genuine schema requirement emerges, pause and get approval first.
+- Do not add export, year-over-year percentage comparisons, custom ranges, transfer pairing, linked refunds, spreadsheet migration, or other post-core features.
+- Once complete, consider the original core finished: import → categorization → Review → monthly accounting → historical reporting → auditable drilldown.
+
+## Deferred post-core enhancements
+
+- Transaction and reporting-data export.
+- Debt records and balance snapshots, including optional extra-paydown goals.
+- Recurring bills and subscriptions.
+- Additional CSV formats, import profiles, statement parsing, and automatic bill matching.
+- Historical spreadsheet migration and backup/restore.
 
 ## Later, only when useful
 

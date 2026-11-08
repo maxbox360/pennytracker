@@ -52,7 +52,16 @@ from .serializers import (
     SubcategorySerializer,
     TransactionSerializer,
 )
-from .accounting import drilldown_rows, monthly_report
+from .accounting import (
+    all_time_report,
+    category_trend,
+    drilldown_queryset,
+    monthly_bounds,
+    monthly_report,
+    serialize_drilldown_row,
+    year_bounds,
+    year_report,
+)
 
 
 class AccountViewSet(ModelViewSet):
@@ -97,14 +106,43 @@ def monthly_report_view(request):
     year, month = report_period(request)
     targets = BudgetTargetSettings.objects.get(pk=1)
     result = monthly_report(year, month, targets)
-    for key in ('_eligible_ids', '_contributions', '_records'):
-        result.pop(key)
+    result.pop('_start', None)
+    result.pop('_end', None)
     return Response(result)
 
 
 @api_view(['GET'])
-def monthly_report_drilldown(request):
-    year, month = report_period(request)
+def all_time_report_view(request):
+    result = all_time_report(BudgetTargetSettings.objects.get(pk=1))
+    for key in ('_start', '_end'):
+        result.pop(key, None)
+    return Response(result)
+
+
+@api_view(['GET'])
+def yearly_report_view(request):
+    year_value = request.query_params.get('year')
+    if not year_value or not year_value.isdecimal() or not 1 <= int(year_value) <= 9998:
+        raise ValidationError({'year': 'Choose a valid calendar year.'})
+    result = year_report(int(year_value), BudgetTargetSettings.objects.get(pk=1))
+    for key in ('_start', '_end'):
+        result.pop(key, None)
+    return Response(result)
+
+
+def historical_drilldown(request, scope):
+    if scope == 'month':
+        year, month = report_period(request)
+        start = date(year, month, 1)
+        end = monthly_bounds(year, month)[1]
+    elif scope == 'year':
+        year_value = request.query_params.get('year')
+        if not year_value or not year_value.isdecimal() or not 1 <= int(year_value) <= 9998:
+            raise ValidationError({'year': 'Choose a valid calendar year.'})
+        start, end = year_bounds(int(year_value))
+    else:
+        start = end = None
+
     metric = request.query_params.get('metric', '')
     subcategory_value = request.query_params.get('subcategory')
     subcategory_id = None
@@ -112,18 +150,76 @@ def monthly_report_drilldown(request):
         if not subcategory_value.isdecimal():
             raise ValidationError({'subcategory': 'Use a subcategory ID.'})
         subcategory_id = int(subcategory_value)
-    report = monthly_report(year, month, BudgetTargetSettings.objects.get(pk=1))
     try:
-        rows = drilldown_rows(report, metric, subcategory_id)
+        rows = drilldown_queryset(start, end, metric, subcategory_id).values(
+            'id',
+            'date',
+            'merchant',
+            'raw_description',
+            'account__name',
+            'classification',
+            'savings_effect',
+            'subcategory__name',
+            'amount',
+            '_contribution',
+        )
     except ValueError as error:
         raise ValidationError({'metric': str(error)}) from error
     page = Paginator(rows, 100).get_page(request.query_params.get('page', 1))
     return Response({
-        'count': len(rows),
+        'count': rows.count(),
         'next': page.next_page_number() if page.has_next() else None,
         'previous': page.previous_page_number() if page.has_previous() else None,
-        'results': rows[(page.number - 1) * 100:page.number * 100],
+        'results': [
+            serialize_drilldown_row(row)
+            for row in page.object_list
+        ],
     })
+
+
+@api_view(['GET'])
+def historical_report_drilldown(request):
+    scope = request.query_params.get('scope', '')
+    if scope not in ('all', 'year', 'month'):
+        raise ValidationError({'scope': 'Choose all, year, or month.'})
+    return historical_drilldown(request, scope)
+
+
+@api_view(['GET'])
+def monthly_report_drilldown(request):
+    return historical_drilldown(request, 'month')
+
+
+@api_view(['GET'])
+def category_trend_view(request):
+    value = request.query_params.get('subcategory', '')
+    if not value.isdecimal():
+        raise ValidationError({'subcategory': 'Use a subcategory ID.'})
+    scope = request.query_params.get('scope', 'all')
+    if scope not in ('all', 'year', 'month'):
+        raise ValidationError({'scope': 'Choose all, year, or month.'})
+    year = None
+    month = None
+    if scope in ('year', 'month'):
+        year_value = request.query_params.get('year', '')
+        if not year_value.isdecimal() or not 1 <= int(year_value) <= 9998:
+            raise ValidationError({'year': 'Choose a valid calendar year.'})
+        year = int(year_value)
+    if scope == 'month':
+        month_value = request.query_params.get('month', '')
+        if not month_value.isdecimal() or not 1 <= int(month_value) <= 12:
+            raise ValidationError({'month': 'Choose a valid calendar month.'})
+        month = int(month_value)
+    result = category_trend(
+        int(value),
+        scope,
+        BudgetTargetSettings.objects.get(pk=1),
+        year,
+        month,
+    )
+    if result is None:
+        raise ValidationError({'subcategory': 'Subcategory not found.'})
+    return Response(result)
 
 
 class SubcategoryViewSet(ModelViewSet):

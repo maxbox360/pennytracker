@@ -209,6 +209,48 @@
   gap: 12px;
 }
 
+.report-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-breadcrumbs button {
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+}
+
+.report-breadcrumbs .is-current {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.report-period-selector {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.report-period-selector input {
+  width: 92px;
+  min-height: 31px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 5px 7px;
+  background: var(--input);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .report-toolbar,
 .month-navigation,
 .report-pagination,
@@ -517,6 +559,156 @@
   gap: 10px;
 }
 
+.historical-table-section,
+.historical-chart {
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.historical-table-section {
+  padding: 10px;
+}
+
+.historical-table-section h3,
+.historical-chart h3 {
+  margin: 0 0 7px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.historical-table-section > .table-scroll,
+.historical-series-table {
+  overflow-x: auto;
+}
+
+.historical-table-section table,
+.historical-series-table table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.historical-table-section th,
+.historical-table-section td,
+.historical-series-table th,
+.historical-series-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 7px 8px;
+  text-align: left;
+}
+
+.historical-table-section thead,
+.historical-series-table thead {
+  background: var(--surface-alt);
+  color: var(--muted);
+}
+
+.historical-table-section .amount-cell,
+.historical-series-table .amount-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.historical-row--incomplete {
+  background: var(--warning-soft);
+}
+
+.historical-chart {
+  overflow: hidden;
+  padding: 10px;
+}
+
+.historical-chart > p {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.historical-chart-scroll {
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.historical-chart-svg {
+  display: block;
+  width: auto;
+  min-width: 760px;
+  max-width: none;
+  height: auto;
+  overflow: visible;
+}
+
+.trend-gridline {
+  stroke: var(--border);
+  stroke-dasharray: 3 4;
+}
+
+.trend-axis-label,
+.trend-target-label {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
+.trend-target-line {
+  stroke-dasharray: 5 4;
+  stroke-width: 1.5px;
+}
+
+.trend-series-line {
+  fill: none;
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.trend-point {
+  stroke: var(--surface);
+  stroke-width: 1.5px;
+}
+
+.trend-point--incomplete {
+  stroke: var(--warning);
+  stroke-width: 2px;
+}
+
+.trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 14px;
+  padding: 8px 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.trend-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.trend-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.trend-legend .trend-legend-target {
+  height: 0;
+  border-top: 2px dashed var(--muted);
+  border-radius: 0;
+}
+
+.trend-legend .trend-legend-incomplete {
+  background: var(--warning);
+}
+
+.historical-series-table .historical-row--incomplete {
+  background: var(--warning-soft);
+}
+
 .report-breakdowns > section {
   min-width: 0;
   padding-top: 9px;
@@ -529,10 +721,10 @@
 .report-completeness {
   display: grid;
   gap: 3px;
-  border: 1px solid var(--warning-border);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   padding: 9px 11px;
-  background: var(--warning-surface);
+  background: var(--warning-soft);
   color: var(--text);
   font-size: 12px;
 }
@@ -1383,12 +1575,17 @@ td.amount-cell {
     grid-template-columns: 1fr;
   }
 
+  .report-toolbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
   .report-summary {
     overflow-x: auto;
   }
 
   .report-summary table {
-    min-width: 720px;
+    min-width: 860px;
   }
 
   .editor-actions,

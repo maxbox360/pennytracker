@@ -23,11 +23,15 @@ from finance.views import (
     ImportBatchViewSet,
     SubcategoryViewSet,
     TransactionViewSet,
+    all_time_report_view,
     budget_target_settings,
+    category_trend_view,
     confirm_import,
+    historical_report_drilldown,
     monthly_report_drilldown,
     monthly_report_view,
     preview_import,
+    yearly_report_view,
 )
 from finance.csrf import csrf_token
 
@@ -44,7 +48,11 @@ urlpatterns = [
     path('api/imports/preview/', preview_import, name='import-preview'),
     path('api/imports/', confirm_import, name='import-confirm'),
     path('api/budget-targets/', budget_target_settings, name='budget-target-settings'),
+    path('api/reports/all-time/', all_time_report_view, name='all-time-report'),
+    path('api/reports/yearly/', yearly_report_view, name='yearly-report'),
     path('api/reports/monthly/', monthly_report_view, name='monthly-report'),
     path('api/reports/monthly/drilldown/', monthly_report_drilldown, name='monthly-report-drilldown'),
+    path('api/reports/drilldown/', historical_report_drilldown, name='historical-report-drilldown'),
+    path('api/reports/category-trend/', category_trend_view, name='category-trend'),
     path('api/', include(router.urls)),
 ]

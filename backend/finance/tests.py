@@ -17,7 +17,14 @@ from .categorization_rules import (
     pending_matches_for_rule,
     rule_matches,
 )
-from .accounting import drilldown_rows, monthly_report
+from .accounting import (
+    all_time_report,
+    category_trend,
+    drilldown_queryset,
+    drilldown_rows,
+    monthly_report,
+    year_report,
+)
 from .csv_imports import (
     MAX_UPLOAD_BYTES,
     DuplicateImportError,
@@ -1858,8 +1865,10 @@ class MonthlyAccountingTests(APITestCase):
         self.assertEqual(report['summary']['needs']['amount'], '30.00')
         self.assertEqual(report['summary']['wants']['amount'], '0.00')
         self.assertEqual(report['breakdown']['NEEDS'][0]['subcategory_name'], 'Household shopping')
-        self.assertEqual(report['_records'][expense.pk].budget_bucket, BudgetBucket.NEEDS)
-        self.assertEqual(report['_records'][refund.pk].budget_bucket, BudgetBucket.NEEDS)
+        expense.refresh_from_db()
+        refund.refresh_from_db()
+        self.assertEqual(expense.budget_bucket, BudgetBucket.NEEDS)
+        self.assertEqual(refund.budget_bucket, BudgetBucket.NEEDS)
 
     def test_savings_contributions_withdrawals_and_remaining_are_separate(self):
         self.create_transaction(classification='INCOME', amount='600.00')
@@ -1889,9 +1898,17 @@ class MonthlyAccountingTests(APITestCase):
         self.assertEqual(report['summary']['net_savings_activity']['amount'], '400.00')
         self.assertEqual(report['summary']['remaining']['amount'], '50.00')
         self.assertEqual(report['breakdown']['SAVINGS'][0]['amount'], '400.00')
-        self.assertEqual(report['_contributions'][contribution.pk][1], Decimal('500.00'))
-        self.assertEqual(report['_contributions'][withdrawal.pk][1], Decimal('100.00'))
-        self.assertNotIn(ordinary.pk, report['_contributions'])
+        contribution_rows = drilldown_rows(report, 'savings_contributions')
+        withdrawal_rows = drilldown_rows(report, 'savings_withdrawals')
+        self.assertEqual(
+            Decimal(next(row['contribution'] for row in contribution_rows if row['id'] == contribution.pk)),
+            Decimal('500.00'),
+        )
+        self.assertEqual(
+            Decimal(next(row['contribution'] for row in withdrawal_rows if row['id'] == withdrawal.pk)),
+            Decimal('100.00'),
+        )
+        self.assertNotIn(ordinary.pk, {row['id'] for row in contribution_rows + withdrawal_rows})
 
     def test_negative_bucket_totals_are_not_clamped(self):
         self.create_transaction(classification='REFUND', amount='35.00', subcategory=self.wants)
@@ -1935,15 +1952,16 @@ class MonthlyAccountingTests(APITestCase):
         self.assertEqual(report['data_completeness']['blockers']['TRANSFER_SAVINGS_UNREVIEWED']['transaction_count'], 1)
         self.assertEqual(report['data_completeness']['excluded']['excluded'], 1)
         self.assertEqual(report['data_completeness']['excluded']['confirmed_duplicate'], 1)
-        self.assertNotIn(pending_transfer.pk, report['_eligible_ids'])
-        self.assertNotIn(excluded.pk, report['_eligible_ids'])
+        needs_ids = set(drilldown_queryset(report['_start'], report['_end'], 'needs').values_list('pk', flat=True))
+        self.assertNotIn(pending_transfer.pk, needs_ids)
+        self.assertNotIn(excluded.pk, needs_ids)
 
     def test_reviewed_transfer_with_no_effect_is_intentionally_ordinary(self):
         transfer = self.create_transaction(classification='TRANSFER', amount='-40.00')
         transfer.mark_reviewed()
         report = self.report()
         self.assertFalse(report['data_completeness']['is_incomplete'])
-        self.assertNotIn(transfer.pk, report['_eligible_ids'])
+        self.assertEqual(report['summary']['needs']['amount'], '0.00')
 
     def test_savings_effect_api_requires_transfer_and_savings_subcategory(self):
         expense = self.create_transaction(classification='EXPENSE', subcategory=self.needs)
@@ -2044,3 +2062,158 @@ class MonthlyAccountingTests(APITestCase):
         self.assertIsNone(report['summary']['needs']['actual_percent'])
         self.assertIsNone(report['summary']['needs']['variance_points'])
         self.assertEqual(report['summary']['remaining']['amount'], '-10.00')
+
+    def test_year_month_all_time_summaries_and_drilldowns_reconcile(self):
+        self.create_transaction(classification='INCOME', amount='1000.00', year=2025, month=12)
+        self.create_transaction(classification='INCOME', amount='2000.00', year=2026, month=10)
+        self.create_transaction(amount='-300.00', subcategory=self.needs, year=2026, month=10)
+        self.create_transaction(classification='REFUND', amount='50.00', subcategory=self.needs, year=2026, month=10)
+        self.create_transaction(amount='-200.00', subcategory=self.wants, year=2026, month=10)
+        self.create_transaction(
+            classification='TRANSFER',
+            amount='-100.00',
+            subcategory=self.savings,
+            savings_effect=SavingsEffect.CONTRIBUTION,
+            year=2026,
+            month=10,
+        )
+        self.create_transaction(
+            classification='TRANSFER',
+            amount='25.00',
+            subcategory=self.savings,
+            savings_effect=SavingsEffect.WITHDRAWAL,
+            year=2026,
+            month=10,
+        )
+        targets = BudgetTargetSettings.objects.get(pk=1)
+        monthly = monthly_report(2026, 10, targets)
+        annual = year_report(2026, targets)
+        all_time = all_time_report(targets)
+
+        self.assertEqual(annual['months'][9]['summary'], monthly['summary'])
+        self.assertEqual(annual['summary']['income']['amount'], '2000.00')
+        self.assertEqual(annual['summary']['needs']['amount'], '250.00')
+        self.assertEqual(annual['summary']['wants']['amount'], '200.00')
+        self.assertEqual(annual['summary']['savings_contributions']['amount'], '100.00')
+        self.assertEqual(annual['summary']['savings_withdrawals']['amount'], '25.00')
+        self.assertEqual(annual['summary']['net_savings_activity']['amount'], '75.00')
+        self.assertEqual(annual['summary']['remaining']['amount'], '1450.00')
+        self.assertEqual(all_time['years'][1]['summary'], annual['summary'])
+        self.assertEqual(all_time['period'], {
+            'start_date': '2025-12-15',
+            'end_date': '2026-10-15',
+        })
+        self.assertEqual(all_time['summary']['income']['amount'], '3000.00')
+        self.assertEqual(all_time['summary']['needs']['actual_percent'], '8.33')
+        self.assertEqual(len(annual['months']), 12)
+        self.assertEqual(annual['months'][0]['ledger_transaction_count'], 0)
+        self.assertEqual(annual['months'][9]['summary'], monthly['summary'])
+        self.assertEqual(all_time['monthly_series'][0]['label'], '2025-12')
+        self.assertEqual(all_time['monthly_series'][-1]['savings_withdrawals'], '25.00')
+        self.assertEqual(all_time['monthly_series'][-1]['net_savings_activity'], '75.00')
+        self.assertEqual(all_time['monthly_series'][-1]['remaining'], '1450.00')
+
+        response = self.client.get('/api/reports/yearly/?year=2026')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['months'][9]['summary'], monthly['summary'])
+        for metric, expected in (
+            ('income', Decimal('2000.00')),
+            ('needs', Decimal('250.00')),
+            ('wants', Decimal('200.00')),
+            ('savings_contributions', Decimal('100.00')),
+            ('savings_withdrawals', Decimal('25.00')),
+            ('net_savings_activity', Decimal('75.00')),
+            ('remaining', Decimal('1450.00')),
+        ):
+            result = self.client.get(
+                f'/api/reports/drilldown/?scope=year&year=2026&metric={metric}'
+            )
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(
+                sum(Decimal(row['contribution']) for row in result.data['results']),
+                expected,
+                metric,
+            )
+        monthly_api = self.client.get(
+            '/api/reports/monthly/?year=2026&month=10'
+        )
+        self.assertEqual(monthly_api.data['summary'], response.data['months'][9]['summary'])
+
+    def test_annual_percentages_use_aggregate_totals_not_monthly_average(self):
+        self.create_transaction(classification='INCOME', amount='100.00', month=1)
+        self.create_transaction(amount='-50.00', subcategory=self.needs, month=1)
+        self.create_transaction(classification='INCOME', amount='900.00', month=2)
+        self.create_transaction(amount='-90.00', subcategory=self.needs, month=2)
+        report = year_report(2026, BudgetTargetSettings.objects.get(pk=1))
+        self.assertEqual(report['summary']['needs']['actual_percent'], '14.00')
+
+    def test_historical_completeness_propagates_and_distinguishes_empty_months(self):
+        self.create_transaction(classification='UNKNOWN', month=2)
+        self.create_transaction(classification='EXPENSE', amount='-5.00', month=3)
+        report = year_report(2026, BudgetTargetSettings.objects.get(pk=1))
+        self.assertEqual(report['data_completeness']['affected_transaction_count'], 2)
+        self.assertTrue(report['months'][1]['data_completeness']['is_incomplete'])
+        self.assertTrue(report['months'][2]['data_completeness']['is_incomplete'])
+        self.assertEqual(report['months'][0]['ledger_transaction_count'], 0)
+        self.assertFalse(report['months'][0]['data_completeness']['is_incomplete'])
+        self.assertEqual(report['monthly_series'][0]['needs'], '0.00')
+
+    def test_all_time_empty_and_year_negative_periods(self):
+        targets = BudgetTargetSettings.objects.get(pk=1)
+        empty = all_time_report(targets)
+        self.assertEqual(empty['period'], {'start_date': None, 'end_date': None})
+        self.assertEqual(empty['years'], [])
+        self.assertEqual(empty['monthly_series'], [])
+        self.create_transaction(classification='INCOME', amount='-10.00', month=1)
+        self.create_transaction(classification='REFUND', amount='25.00', subcategory=self.wants, month=1)
+        report = year_report(2026, targets)
+        self.assertEqual(report['summary']['income']['amount'], '-10.00')
+        self.assertIsNone(report['summary']['wants']['actual_percent'])
+        self.assertEqual(report['summary']['wants']['amount'], '-25.00')
+        self.assertEqual(report['summary']['remaining']['amount'], '15.00')
+
+    def test_ranked_categories_keep_negative_net_and_historical_bucket_after_move(self):
+        self.create_transaction(amount='-20.00', subcategory=self.wants, year=2025, month=5)
+        self.create_transaction(classification='REFUND', amount='30.00', subcategory=self.wants, year=2025, month=5)
+        Subcategory.objects.filter(pk=self.wants.pk).update(
+            name='Dining at home',
+            budget_bucket=BudgetBucket.NEEDS,
+        )
+        self.wants.refresh_from_db()
+        self.create_transaction(amount='-40.00', subcategory=self.wants, year=2026, month=6)
+        self.create_transaction(classification='UNKNOWN', year=2026, month=5)
+        historical = all_time_report(BudgetTargetSettings.objects.get(pk=1))
+        self.assertEqual(historical['breakdown']['WANTS'][0]['amount'], '-10.00')
+        self.assertEqual(historical['breakdown']['NEEDS'][0]['amount'], '40.00')
+        self.assertEqual(historical['breakdown']['WANTS'][0]['subcategory_name'], 'Dining at home')
+        trend = category_trend(self.wants.pk, 'all', BudgetTargetSettings.objects.get(pk=1))
+        self.assertEqual(trend['series'][0]['buckets']['WANTS']['amount'], '-10.00')
+        self.assertEqual(trend['series'][13]['buckets']['NEEDS']['amount'], '40.00')
+        self.assertEqual(trend['series'][13]['buckets']['WANTS']['amount'], '0.00')
+        self.assertTrue(trend['series'][12]['is_incomplete'])
+        self.assertEqual(trend['series'][12]['affected_transaction_count'], 1)
+        month_trend = category_trend(
+            self.wants.pk,
+            'month',
+            BudgetTargetSettings.objects.get(pk=1),
+            2026,
+            5,
+        )
+        self.assertEqual(month_trend['scope'], {'type': 'month', 'year': 2026, 'month': 5})
+        self.assertTrue(month_trend['series'][0]['is_incomplete'])
+        response = self.client.get(
+            f'/api/reports/category-trend/?subcategory={self.wants.pk}&scope=month&year=2026&month=5'
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_historical_api_empty_year_and_category_trend_validation(self):
+        response = self.client.get('/api/reports/yearly/?year=2024')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['months']), 12)
+        self.assertTrue(all(month['ledger_transaction_count'] == 0 for month in response.data['months']))
+        self.assertEqual(self.client.get('/api/reports/all-time/').data['period'], {
+            'start_date': None,
+            'end_date': None,
+        })
+        missing = self.client.get('/api/reports/category-trend/?subcategory=999')
+        self.assertEqual(missing.status_code, 400)
