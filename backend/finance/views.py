@@ -427,6 +427,8 @@ class TransactionViewSet(ModelViewSet):
                 transaction_data = {'subcategory': subcategory.pk}
                 if 'classification' in request.data:
                     transaction_data['classification'] = request.data['classification']
+                    if request.data['classification'] != TransactionClassification.TRANSFER:
+                        transaction_data['savings_effect'] = Transaction.SavingsEffect.NONE
                 transaction_serializer = TransactionSerializer(
                     transaction_record,
                     data=transaction_data,
