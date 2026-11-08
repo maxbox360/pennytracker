@@ -109,7 +109,8 @@
 }
 
 .refresh-button,
-.message button {
+.message button,
+.primary-button {
   border: 1px solid #dfe4eb;
   border-radius: 8px;
   background: #fff;
@@ -122,13 +123,126 @@
 }
 
 .refresh-button:hover,
-.message button:hover {
+.message button:hover,
+.primary-button:hover:not(:disabled) {
   border-color: #b6c4d2;
 }
 
-.refresh-button:disabled {
+.refresh-button:disabled,
+.primary-button:disabled {
   cursor: wait;
   opacity: 0.6;
+}
+
+.primary-button {
+  border-color: #187b5f;
+  background: #187b5f;
+  color: #fff;
+}
+
+.primary-button:hover:not(:disabled) {
+  border-color: #12684f;
+  background: #12684f;
+}
+
+.import-card {
+  overflow: hidden;
+  margin-bottom: 24px;
+  border: 1px solid #e6e9ef;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 8px 26px rgb(26 39 61 / 4%);
+}
+
+.import-heading {
+  padding: 18px 24px;
+  border-bottom: 1px solid #edf0f4;
+}
+
+.import-heading h2 {
+  margin: 0;
+  color: #283347;
+  font-size: 15px;
+  font-weight: 670;
+}
+
+.import-heading p,
+.preview-summary {
+  margin: 5px 0 0;
+  color: #8a93a2;
+  font-size: 12px;
+}
+
+.import-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 18px;
+  padding: 20px 24px;
+}
+
+.import-controls label {
+  display: grid;
+  flex: 1;
+  gap: 7px;
+  color: #596477;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.import-controls select,
+.import-controls input {
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid #dfe4eb;
+  border-radius: 7px;
+  background: #fff;
+  color: #394457;
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 10px;
+}
+
+.preview-content {
+  padding: 0 24px 22px;
+}
+
+.preview-summary {
+  margin: 0 0 12px;
+}
+
+.preview-warning,
+.import-success {
+  margin: 12px 0;
+  border-radius: 7px;
+  background: #fff8e8;
+  color: #825e14;
+  font-size: 12px;
+  padding: 10px 12px;
+}
+
+.import-success {
+  margin: 18px 24px;
+  background: #e8f6ef;
+  color: #24744d;
+}
+
+.invalid-rows {
+  margin: 14px 0;
+  border: 1px solid #f0d7d7;
+  border-radius: 7px;
+  background: #fffafa;
+  color: #984848;
+  font-size: 12px;
+  padding: 12px;
+}
+
+.invalid-rows h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.invalid-rows p {
+  margin: 5px 0;
 }
 
 .ledger-card {
@@ -366,9 +480,24 @@ td.amount-cell {
 
   .page-header {
     align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .ledger-heading {
     padding: 16px 18px;
+  }
+
+  .import-controls {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 18px;
+  }
+
+  .import-heading {
+    padding: 16px 18px;
+  }
+
+  .preview-content {
+    padding: 0 18px 18px;
   }
 }

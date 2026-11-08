@@ -20,6 +20,10 @@ Backend and frontend source directories are bind-mounted for reloads. Frontend p
 
 The published ports are bound to localhost. This setup is for local development, not production deployment. If Python dependencies change, rebuild with `docker compose -f docker-compose.yaml up --build`; frontend dependencies are refreshed from the lockfile at each startup.
 
+## Import a CSV
+
+Create an active account in Django admin, open PennyTracker, and choose **Import CSV**. Select the destination account and a supported CSV file (maximum 20 MiB), preview it, then confirm. The original filename is audit metadata only; the selected account and CSV contents determine the import. The first importer accepts posted SoFi checking CSVs, and exact file re-imports to the same account are blocked.
+
 ## Run without Docker
 
 ```sh

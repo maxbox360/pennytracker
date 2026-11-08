@@ -1,0 +1,8 @@
+# Keep root-level bank exports out of Docker build contexts; backend test fixtures remain included.
+/*.csv
+**/db.sqlite3
+**/db.sqlite3-journal
+**/__pycache__/
+**/*.py[cod]
+**/node_modules/
+**/dist/

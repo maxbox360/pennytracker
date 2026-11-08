@@ -1,0 +1,7 @@
+Date,Description,Type,Amount,Current balance,Status
+2026-02-01,Synthetic Corner Market,DEBIT_CARD,-12.34,987.66,Posted
+2026-02-02,Synthetic Interest,INTEREST_EARNED,0.06,987.72,Posted
+2026-02-03,Synthetic roundup,ROUNDUP,-0.50,987.22,Posted
+2026-02-04,"Synthetic ""Paper, Shop""",DEBIT_CARD,-4.00,983.22,Posted
+2026-02-05,Synthetic payment,DIRECT_PAY,-25.00,958.22,Posted
+2026-02-06,Synthetic deposit,DEPOSIT,15.00,973.22,Posted

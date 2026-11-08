@@ -1,5 +1,24 @@
 from rest_framework import serializers
-from .models import Account, Subcategory, Transaction
+from .models import Account, ImportBatch, Subcategory, Transaction
+
+
+class ImportBatchSerializer(serializers.ModelSerializer):
+    account_name = serializers.CharField(source='account.name', read_only=True)
+
+    class Meta:
+        model = ImportBatch
+        fields = (
+            'id',
+            'account',
+            'account_name',
+            'original_filename',
+            'format_identifier',
+            'source_row_count',
+            'imported_row_count',
+            'earliest_transaction_date',
+            'latest_transaction_date',
+            'imported_at',
+        )
 
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -42,10 +61,20 @@ class TransactionSerializer(serializers.ModelSerializer):
             'raw_description',
             'merchant',
             'amount',
+            'source_type',
+            'import_batch',
+            'source_row',
             'classification',
             'budget_bucket',
             'notes',
             'created_at',
             'updated_at',
         )
-        read_only_fields = ('budget_bucket', 'created_at', 'updated_at')
+        read_only_fields = (
+            'budget_bucket',
+            'source_type',
+            'import_batch',
+            'source_row',
+            'created_at',
+            'updated_at',
+        )

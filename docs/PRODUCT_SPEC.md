@@ -43,7 +43,7 @@ For each significant feature:
 
 # Core application concept
 
-The application should allow me to import monthly transaction data from my bank and provide a detailed analysis of my spending.
+The application should allow me to import transaction data from my bank across arbitrary date ranges and provide a detailed analysis of my spending.
 
 The basic hierarchy should be:
 
@@ -1554,6 +1554,16 @@ The following decisions refine and take precedence over earlier tentative option
 - **Transaction classification and review are separate:** Classification values are `UNKNOWN`, `EXPENSE`, `INCOME`, `REFUND`, `TRANSFER`, and `EXCLUDED`. A transaction may be an `EXPENSE` without a subcategory. Any later review/categorization state must be stored separately from financial classification.
 - **Historical bucket snapshot:** A categorized transaction stores the applicable `NEEDS`, `WANTS`, or `SAVINGS` bucket as a snapshot. Assigning a subcategory defaults the snapshot from its current bucket; changing a subcategory's bucket does not rewrite existing transactions. An explicit recategorization may update the transaction's stored bucket.
 - **Transaction amounts:** Store amounts from the account's perspective: incoming funds are positive and outgoing funds are negative. Keep the imported raw description and amount intact.
+- **Milestone 2 CSV import:** The first importer supports the observed SoFi checking CSV structure (`Date`, `Description`, `Type`, `Amount`, `Current balance`, `Status`) without treating its filename as financial input. `Current balance` is ignored; source type is preserved; only unambiguous debit-card outflows and earned-interest inflows are classified automatically. Other types remain `UNKNOWN`.
+- **Import safety:** Preview and confirmation use a 20 MiB maximum. Require strict ISO dates, Decimal amounts with at most two fractional digits, and Posted status. Any malformed/non-Posted row blocks the whole batch; an otherwise valid row with ambiguous classification can be imported as `UNKNOWN`.
+- **Import audit and duplicate protection:** Each successful import creates an ImportBatch with selected account, original filename, parser identifier, timestamp, source/imported row counts, and SHA-256 file hash. Block exact-content re-imports per account; do not silently deduplicate transaction lookalikes. Link imported transactions to batch and 1-based source data row. CSV contents are transient and are not stored.
+- **Local financial-file privacy:** Root-level CSV exports are ignored by Git and excluded from Docker build contexts. Sanitized CSV fixtures under backend tests remain available to native and container builds.
+- **Arbitrary import ranges:** A CSV may cover any range, including multiple months or years. ImportBatch is provenance, not a reporting period; transaction dates are authoritative, and filenames never determine dates or account identity.
+- **Import date-range audit:** Each successful ImportBatch stores earliest and latest transaction dates from its parsed rows. Import history exposes these dates without deriving them from filenames.
+- **Institution boundary:** The first concrete parser is specific to the supplied SoFi checking format. Source-specific headers, status interpretation, and classification hints stay in that parser; normalized transactions, ImportBatch, API resources, and future reports remain institution-independent. Add a second small parser only after inspecting a real second format.
+- **Overlapping imports:** Exact-file SHA-256 protection does not catch overlapping, non-identical exports. This remains a known limitation for the future duplicate/review workflow. Preserve batch, source row, source type, date, description, amount, and file hash as provenance; do not silently remove similar transactions.
+- **Reporting periods and analysis:** Reporting is based on transaction dates, never import-file or ImportBatch boundaries. The planned hierarchy is All Time → Year → Month → Transactions, with totals, subcategory breakdowns, monthly/yearly comparisons, trends over time, and auditable drill-downs. Custom date ranges should be straightforward later but are not required before All Time, Year, and Month.
+- **Savings and historical reporting:** All reporting must use each transaction's snapshotted Needs/Wants/Savings bucket. Savings remains actual qualifying activity; Remaining / Unallocated is income minus Needs, Wants, and Savings, never silently reclassified as Savings.
 
 # Final development philosophy
 

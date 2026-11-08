@@ -20,9 +20,13 @@ Implement one milestone at a time; keep the application runnable and verify each
 
 ## Milestone 2 — CSV import
 
-- Support one real user-provided CSV format and record each upload as an Import Batch.
-- Take account identity from the selected account/import context, dates from CSV contents, and preserve the original filename only as metadata.
-- Detect and automatically reject only high-confidence duplicates; send uncertain candidates to review.
+- Support the observed SoFi checking CSV format with a small explicit parser and record successful imports as Import Batches.
+- Accept arbitrary date ranges in one file; preview against an explicitly selected active account, derive dates from CSV rows, and preserve the original filename only as metadata.
+- Enforce a 20 MiB limit, strict ISO dates, Decimal amounts, and Posted-only rows. Any malformed or unsupported row blocks the whole import; ambiguous but valid classifications remain `UNKNOWN`.
+- Preserve generic transaction provenance and batch earliest/latest transaction dates for audit. Ignore source balance. ImportBatch boundaries never determine reporting periods.
+- Keep the SoFi parser-specific assumptions in the concrete parser; keep normalized data and the rest of the app institution-independent.
+- Block exact file re-import per account by SHA-256. Overlapping non-identical imports remain a known limitation for the future duplicate/review workflow; do not silently deduplicate similar rows.
+- Test with synthetic sanitized fixtures only; exclude root-level CSV exports from Git and Docker build contexts.
 
 ## Milestone 3 — Categorization and review
 
@@ -39,7 +43,9 @@ Implement one milestone at a time; keep the application runnable and verify each
 
 ## Milestone 5 — Historical reporting and export
 
-- Add useful yearly and month-to-month reporting after monthly calculations are established.
+- Add All Time and calendar-year views, year-over-year comparisons, subcategory breakdowns, and spending/savings trends across months and years.
+- Keep all reporting periods independent of imports and drill from every aggregate to the contributing transactions using historical bucket snapshots.
+- Leave custom date ranges straightforward to add later; first deliver All Time, Year, and Month.
 - Add transaction and reporting-data export; consider historical spreadsheet migration separately.
 
 ## Later, only when useful

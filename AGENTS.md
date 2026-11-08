@@ -6,7 +6,7 @@ This repository contains a local-only personal finance application.
 
 The primary workflow is:
 
-**Import transactions → automatically categorize known transactions → review unknown transactions → understand monthly and yearly spending.**
+**Import transactions → automatically categorize known transactions → review unknown transactions → understand spending over time.**
 
 The application should make an existing manual spreadsheet workflow faster, easier to audit, and easier to explore.
 
@@ -347,8 +347,9 @@ Use the most reliable available combination of transaction attributes and import
 
 CSV is the initial import format.
 
-Do not tightly couple transaction importing to one financial institution.
+Imports may contain any date range: a month, multiple months, year-to-date, a calendar year, multiple years, or an arbitrary statement range. ImportBatch records provenance and never defines a reporting period. Transaction dates, not filenames or batch boundaries, determine reporting periods.
 
+Keep source-specific parsing in the concrete parser/format-recognition layer and keep PennyTracker transactions, batches, endpoints, categories, and reporting source-independent. Do not tightly couple transaction importing to one financial institution.
 Prefer a normalized transaction format and configurable import mappings.
 
 Potential normalized fields include:
@@ -364,6 +365,8 @@ Potential normalized fields include:
 The first implementation can remain simple.
 
 Do not build a plugin framework for importers unless multiple real formats demonstrate that it is necessary.
+
+Exact-file hashes prevent identical re-imports only. Overlapping but non-identical exports remain a known limitation until transaction-level duplicate handling is implemented; never discard similar-looking transactions silently.
 
 ---
 
@@ -418,6 +421,8 @@ Avoid:
 Charts should answer a question.
 
 If a table communicates something more clearly, use a table.
+
+Reporting should support All Time, calendar year, and month views, with trends over time and drill-down from aggregates to their contributing transactions. Custom date ranges should remain straightforward but need not be implemented before these core periods. Reporting periods are independent of ImportBatch boundaries and use transaction dates.
 
 ---
 

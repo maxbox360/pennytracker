@@ -39,6 +39,30 @@ class Account(models.Model):
         return self.name
 
 
+class ImportBatch(models.Model):
+    account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name='import_batches')
+    original_filename = models.CharField(max_length=255)
+    file_sha256 = models.CharField(max_length=64)
+    format_identifier = models.CharField(max_length=50)
+    source_row_count = models.PositiveIntegerField()
+    imported_row_count = models.PositiveIntegerField()
+    earliest_transaction_date = models.DateField(null=True, blank=True)
+    latest_transaction_date = models.DateField(null=True, blank=True)
+    imported_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-imported_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=('account', 'file_sha256'),
+                name='unique_import_file_per_account',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.original_filename} → {self.account}'
+
+
 class Subcategory(models.Model):
     name = models.CharField(max_length=100)
     budget_bucket = models.CharField(max_length=10, choices=BudgetBucket.choices)
@@ -73,6 +97,15 @@ class Transaction(models.Model):
     raw_description = models.TextField()
     merchant = models.CharField(max_length=200, blank=True)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
+    source_type = models.CharField(max_length=50, blank=True)
+    import_batch = models.ForeignKey(
+        ImportBatch,
+        on_delete=models.PROTECT,
+        related_name='transactions',
+        null=True,
+        blank=True,
+    )
+    source_row = models.PositiveIntegerField(null=True, blank=True)
     classification = models.CharField(
         max_length=10,
         choices=Classification.choices,
@@ -93,6 +126,11 @@ class Transaction(models.Model):
             models.CheckConstraint(
                 condition=Q(classification__in=TransactionClassification.values),
                 name='valid_transaction_classification',
+            ),
+            models.UniqueConstraint(
+                fields=('import_batch', 'source_row'),
+                condition=Q(import_batch__isnull=False),
+                name='unique_import_batch_source_row',
             ),
         ]
 

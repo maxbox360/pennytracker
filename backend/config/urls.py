@@ -17,14 +17,24 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from finance.views import AccountViewSet, SubcategoryViewSet, TransactionViewSet
+from finance.views import (
+    AccountViewSet,
+    ImportBatchViewSet,
+    SubcategoryViewSet,
+    TransactionViewSet,
+    confirm_import,
+    preview_import,
+)
 
 router = DefaultRouter()
 router.register('accounts', AccountViewSet)
+router.register('import-batches', ImportBatchViewSet)
 router.register('subcategories', SubcategoryViewSet)
 router.register('transactions', TransactionViewSet)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/imports/preview/', preview_import, name='import-preview'),
+    path('api/imports/', confirm_import, name='import-confirm'),
     path('api/', include(router.urls)),
 ]
