@@ -236,7 +236,10 @@ export default function TransactionTable({ mode, reload }: Props) {
     setSelected([])
     setEditingId(null)
     setDraft(null)
-  }, [page])
+  }, [
+    page, mode, accountFilter, classificationFilter, sourceTypeFilter, subcategoryFilter,
+    bucketFilter, reviewStatusFilter, reasonFilter, startDate, endDate, search, sort,
+  ])
 
   useEffect(() => {
     setSelected([])
