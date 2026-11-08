@@ -246,7 +246,7 @@ function App() {
             <div className="import-controls">
               <label>
                 Account
-                <select value={accountId} onChange={(event) => {
+                <select disabled={importing} value={accountId} onChange={(event) => {
                   setAccountId(event.target.value)
                   setPreview(null)
                   setImportResult(null)
@@ -260,6 +260,7 @@ function App() {
               <label>
                 CSV file (20 MiB maximum)
                 <input
+                  disabled={importing}
                   type="file"
                   accept=".csv,text/csv"
                   onChange={(event) => {
