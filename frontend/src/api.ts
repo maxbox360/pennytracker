@@ -1,4 +1,3 @@
-let csrfToken: string | null = null
 let csrfRequest: Promise<string> | null = null
 
 function readCsrfCookie() {
@@ -10,17 +9,13 @@ function readCsrfCookie() {
 
 async function getCsrfToken() {
   const cookieToken = readCsrfCookie()
-  if (cookieToken) {
-    csrfToken = cookieToken
-    return cookieToken
-  }
+  if (cookieToken) return cookieToken
   if (!csrfRequest) {
     csrfRequest = fetch('/api/csrf/', { credentials: 'same-origin' })
       .then(async (response) => {
         if (!response.ok) throw new Error(`CSRF initialization failed (${response.status})`)
         const result: { csrfToken: string } = await response.json()
-        csrfToken = readCsrfCookie() ?? result.csrfToken
-        return csrfToken
+        return readCsrfCookie() ?? result.csrfToken
       })
       .finally(() => {
         csrfRequest = null
