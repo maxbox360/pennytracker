@@ -2591,3 +2591,445 @@ class MonthlyAccountingTests(APITestCase):
         })
         missing = self.client.get('/api/reports/category-trend/?subcategory=999')
         self.assertEqual(missing.status_code, 400)
+
+
+class ReviewReportReconciliationTests(APITestCase):
+    def setUp(self):
+        self.account = Account.objects.create(name='Checking')
+        self.wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
+
+    def make(self, classification, day=15, month=10, **kwargs):
+        return Transaction.objects.create(
+            account=self.account,
+            date=date(2026, month, day),
+            raw_description='Synthetic row',
+            amount=Decimal('-10.00'),
+            classification=classification,
+            **kwargs,
+        )
+
+    def review_ids(self):
+        response = self.client.get('/api/transactions/?review_status=PENDING&page_size=100')
+        return {item['id'] for item in response.json()['results']}
+
+    def blocker_count(self, url):
+        return self.client.get(url).json()['data_completeness']['affected_transaction_count']
+
+    def assert_reports_agree(self, expected):
+        self.assertEqual(self.blocker_count('/api/reports/all-time/'), expected)
+        self.assertEqual(self.blocker_count('/api/reports/yearly/?year=2026'), expected)
+        self.assertEqual(self.blocker_count('/api/reports/monthly/?year=2026&month=10'), expected)
+
+    def test_unknown_counted_by_reports_is_in_review_until_resolved(self):
+        unknown = self.make(Transaction.Classification.UNKNOWN)
+        self.assertIn(unknown.pk, self.review_ids())
+        self.assert_reports_agree(1)
+
+        unknown.classification = Transaction.Classification.EXCLUDED
+        unknown.save()
+        self.assert_reports_agree(0)
+        unknown.mark_reviewed()
+        self.assertNotIn(unknown.pk, self.review_ids())
+
+    def test_confirmed_duplicate_and_excluded_are_not_attention(self):
+        original = self.make(Transaction.Classification.UNKNOWN)
+        duplicate = self.make(Transaction.Classification.UNKNOWN)
+        duplicate.duplicate_candidates.add(original)
+        duplicate.duplicate_resolution = DuplicateResolution.CONFIRMED_DUPLICATE
+        duplicate.duplicate_of = original
+        duplicate.save()
+        self.make(Transaction.Classification.EXCLUDED)
+
+        self.assertEqual(self.review_ids(), {original.pk})
+        self.assert_reports_agree(1)
+
+    def test_rule_completed_expense_is_not_a_stale_blocker(self):
+        record = self.make(Transaction.Classification.EXPENSE, subcategory=self.wants)
+        self.assertEqual(record.review_status, ReviewStatus.NOT_REQUIRED)
+        self.assertNotIn(record.pk, self.review_ids())
+        self.assert_reports_agree(0)
+
+    def test_every_report_blocker_is_pending_review(self):
+        self.make(Transaction.Classification.UNKNOWN)
+        self.make(Transaction.Classification.EXPENSE)
+        self.make(Transaction.Classification.TRANSFER)
+        self.make(Transaction.Classification.EXPENSE, subcategory=self.wants, categorization_rule_conflict=True)
+        from .accounting import _blocker_union, _eligibility_blockers
+        blocked = set(
+            Transaction.objects.filter(_blocker_union(_eligibility_blockers())).values_list('pk', flat=True)
+        )
+        self.assertTrue(blocked)
+        self.assertLessEqual(blocked, self.review_ids())
+
+
+class ReviewStateRepairMigrationTests(TransactionTestCase):
+    def test_repair_migration_returns_stale_rows_to_review(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate([('finance', '0008_remove_categorizationrule_valid_rule_classification_and_more')])
+        apps = executor.loader.project_state(
+            [('finance', '0008_remove_categorizationrule_valid_rule_classification_and_more')]
+        ).apps
+        Old = apps.get_model('finance', 'Transaction')
+        account = apps.get_model('finance', 'Account').objects.create(name='Repair test')
+
+        def row(**kwargs):
+            return Old.objects.create(
+                account_id=account.pk, date=date(2026, 1, 1), raw_description='Synthetic',
+                amount=Decimal('-1.00'), review_status='NOT_REQUIRED', **kwargs,
+            ).pk
+
+        stale = row(classification='UNKNOWN')
+        confirmed = row(classification='UNKNOWN', duplicate_resolution='CONFIRMED_DUPLICATE')
+        excluded = row(classification='EXCLUDED')
+        try:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
+            statuses = dict(Transaction.objects.filter(pk__in=(stale, confirmed, excluded)).values_list('pk', 'review_status'))
+            self.assertEqual(statuses[stale], 'PENDING')
+            self.assertEqual(statuses[confirmed], 'NOT_REQUIRED')
+            self.assertEqual(statuses[excluded], 'NOT_REQUIRED')
+        finally:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
+
+
+class SavingsTransferRuleTests(APITestCase):
+    def setUp(self):
+        self.account = Account.objects.create(name='Checking')
+        self.wants = Subcategory.objects.create(name='Dining', budget_bucket=BudgetBucket.WANTS)
+        self.needs = Subcategory.objects.create(name='Groceries', budget_bucket=BudgetBucket.NEEDS)
+        self.fund = Subcategory.objects.create(name='Emergency Fund', budget_bucket=BudgetBucket.SAVINGS)
+        self.goal = Subcategory.objects.create(name='Vacation Goal', budget_bucket=BudgetBucket.SAVINGS)
+        self.other = Subcategory.objects.create(
+            name='Gifts', scope=SubcategoryScope.OTHER_INFLOW, budget_bucket=None,
+        )
+
+    def savings_rule(self, value='AUTO SAVE', effect=SavingsEffect.CONTRIBUTION, target=None,
+                     match_type=RuleMatchType.STARTS_WITH, **kwargs):
+        return CategorizationRule.objects.create(
+            rule_kind='SAVINGS_TRANSFER',
+            classification='TRANSFER',
+            savings_effect=effect,
+            match_type=match_type,
+            match_value=value,
+            subcategory=target or self.fund,
+            **kwargs,
+        )
+
+    def txn(self, description='AUTO SAVE * 1', classification='UNKNOWN', amount='-1.00', **kwargs):
+        return Transaction.objects.create(
+            account=self.account, date=date(2026, 3, 5), raw_description=description,
+            amount=Decimal(amount), classification=classification, **kwargs,
+        )
+
+    def payload(self, **overrides):
+        return {
+            'rule_kind': 'SAVINGS_TRANSFER', 'match_type': 'STARTS_WITH', 'match_value': 'AUTO SAVE *',
+            'savings_effect': 'CONTRIBUTION', 'subcategory': self.fund.id, **overrides,
+        }
+
+    def preview(self, content):
+        return self.client.post(
+            '/api/imports/preview/',
+            {'account': self.account.id, 'file': SimpleUploadedFile('s.csv', content, content_type='text/csv')},
+            format='multipart',
+        )
+
+    # --- matching ---
+    def test_starts_with_is_case_insensitive_whitespace_normalized_and_prefix_only(self):
+        rule = self.savings_rule(value='  auto   save * ')
+        for description, expected in (
+            ('AUTO SAVE * 77', True),
+            ('  Auto \t Save *  77', True),
+            ('PAYMENT AUTO SAVE * 77', False),
+            ('AUTO SAVER 77', False),
+        ):
+            self.assertEqual(rule_matches(rule, 'UNKNOWN', description), expected, description)
+
+    def test_existing_rules_default_to_expense_category_and_never_change_classification(self):
+        rule = CategorizationRule.objects.create(match_value='COFFEE', subcategory=self.wants)
+        self.assertEqual(rule.rule_kind, 'EXPENSE_CATEGORY')
+        self.assertEqual(rule.savings_effect, SavingsEffect.NONE)
+        self.assertFalse(rule_matches(rule, 'UNKNOWN', 'COFFEE'))
+        self.assertTrue(rule_matches(rule, 'EXPENSE', 'COFFEE'))
+        self.assertEqual(evaluate_rules('EXPENSE', 'COFFEE', [rule])['classification'], None)
+
+    def test_expense_contains_rule_can_use_starts_with_but_still_requires_expense(self):
+        rule = CategorizationRule.objects.create(
+            match_value='COFFEE', match_type=RuleMatchType.STARTS_WITH, subcategory=self.wants,
+        )
+        self.assertTrue(rule_matches(rule, 'EXPENSE', 'Coffee shop'))
+        self.assertFalse(rule_matches(rule, 'EXPENSE', 'The coffee shop'))
+
+    # --- eligibility ---
+    def test_savings_rule_eligibility_matrix(self):
+        rule = self.savings_rule()
+        for classification, unresolved, expected in (
+            ('UNKNOWN', True, True),
+            ('TRANSFER', True, True),
+            ('TRANSFER', False, False),
+            ('EXPENSE', True, False),
+            ('INCOME', True, False),
+            ('REFUND', True, False),
+            ('EXCLUDED', True, False),
+            ('OTHER_INFLOW', True, False),
+        ):
+            self.assertEqual(
+                rule_matches(rule, classification, 'AUTO SAVE * 1', unresolved), expected,
+                (classification, unresolved),
+            )
+
+    def test_savings_rule_does_not_compete_with_expense_rule_on_expense_transactions(self):
+        expense_rule = CategorizationRule.objects.create(match_value='AUTO SAVE', subcategory=self.wants)
+        savings_rule = self.savings_rule()
+        expense = evaluate_rules('EXPENSE', 'AUTO SAVE * 1', [expense_rule, savings_rule])
+        self.assertFalse(expense['conflict'])
+        self.assertEqual(expense['subcategory'], self.wants)
+        self.assertIsNone(expense['classification'])
+        unknown = evaluate_rules('UNKNOWN', 'AUTO SAVE * 1', [expense_rule, savings_rule])
+        self.assertEqual(unknown['classification'], 'TRANSFER')
+        self.assertEqual(unknown['subcategory'], self.fund)
+
+    # --- conflicts ---
+    def test_conflicts_depend_on_semantic_outcome_not_rule_id(self):
+        same_a = self.savings_rule(value='AUTO SAVE')
+        same_b = self.savings_rule(value='AUTO', match_type=RuleMatchType.CONTAINS)
+        shared = evaluate_rules('UNKNOWN', 'AUTO SAVE * 1', [same_a, same_b])
+        self.assertFalse(shared['conflict'])
+        self.assertEqual((shared['savings_effect'], shared['subcategory']), (SavingsEffect.CONTRIBUTION, self.fund))
+        effect = self.savings_rule(value='AUTO SAVE *', effect=SavingsEffect.WITHDRAWAL)
+        target = self.savings_rule(value='AUTO SAVE *', target=self.goal)
+        for other in (effect, target):
+            result = evaluate_rules('UNKNOWN', 'AUTO SAVE * 1', [same_a, other])
+            self.assertTrue(result['conflict'])
+            self.assertIsNone(result['rule'])
+            self.assertEqual(result['savings_effect'], SavingsEffect.NONE)
+            reverse = evaluate_rules('UNKNOWN', 'AUTO SAVE * 1', [other, same_a])
+            self.assertTrue(reverse['conflict'])
+
+    # --- API validation ---
+    def test_api_validates_targets_and_kind_fields(self):
+        ok = self.client.post('/api/categorization-rules/', self.payload(), format='json')
+        self.assertEqual(ok.status_code, 201)
+        self.assertEqual(ok.data['classification'], 'TRANSFER')
+        archived = Subcategory.objects.create(name='Old', budget_bucket=BudgetBucket.SAVINGS, is_active=False)
+        for subcategory in (self.needs, self.wants, self.other, archived):
+            response = self.client.post(
+                '/api/categorization-rules/',
+                self.payload(match_value='X', subcategory=subcategory.id), format='json',
+            )
+            self.assertEqual(response.status_code, 400, subcategory.name)
+        for bad in ({'savings_effect': 'NONE'}, {'classification': 'EXPENSE'}, {'match_type': 'EQUALS'}):
+            response = self.client.post(
+                '/api/categorization-rules/', self.payload(match_value='Y', **bad), format='json',
+            )
+            self.assertEqual(response.status_code, 400, bad)
+        expense_to_savings = self.client.post('/api/categorization-rules/', {
+            'match_value': 'Z', 'subcategory': self.fund.id,
+        }, format='json')
+        self.assertEqual(expense_to_savings.status_code, 400)
+        expense_effect = self.client.post('/api/categorization-rules/', {
+            'match_value': 'Z', 'subcategory': self.wants.id, 'savings_effect': 'CONTRIBUTION',
+        }, format='json')
+        self.assertEqual(expense_effect.status_code, 400)
+
+    def test_same_condition_active_savings_rules_are_rejected_as_duplicates(self):
+        self.assertEqual(self.client.post('/api/categorization-rules/', self.payload(), format='json').status_code, 201)
+        duplicate = self.client.post(
+            '/api/categorization-rules/', self.payload(savings_effect='WITHDRAWAL'), format='json',
+        )
+        self.assertEqual(duplicate.status_code, 400)
+
+    # --- import ---
+    def test_import_preview_and_confirm_agree_and_apply_savings_rule(self):
+        rule = self.savings_rule(value='AUTO SAVE *')
+        withdrawal = self.savings_rule(value='AUTO PULL', effect=SavingsEffect.WITHDRAWAL, target=self.goal)
+        content = (
+            b'Date,Description,Type,Amount,Status\n'
+            b'2026-03-05,AUTO SAVE * 1,TRANSFER_OUT,-1.00,Posted\n'
+            b'2026-03-06,AUTO PULL 2,TRANSFER_IN,5.00,Posted\n'
+            b'2026-03-07,NOT MATCHING 3,DEBIT_CARD,-9.00,Posted\n'
+        )
+        preview = self.preview(content)
+        self.assertEqual(preview.status_code, 200)
+        first, second, third = preview.data['valid_rows']
+        self.assertEqual(first['categorization']['status'], 'AUTO_SAVINGS_TRANSFER')
+        self.assertEqual(first['categorization']['classification'], 'TRANSFER')
+        self.assertEqual(first['categorization']['savings_effect'], 'CONTRIBUTION')
+        self.assertEqual(second['categorization']['savings_effect'], 'WITHDRAWAL')
+        self.assertEqual(second['categorization']['subcategory']['name'], 'Vacation Goal')
+        self.assertEqual(preview.data['review_required_row_count'], 1)
+
+        confirm = self.client.post(
+            '/api/imports/',
+            {'account': self.account.id, 'file': SimpleUploadedFile('s.csv', content, content_type='text/csv')},
+            format='multipart',
+        )
+        self.assertEqual(confirm.status_code, 201)
+        one, two, three = Transaction.objects.order_by('source_row')
+        self.assertEqual(
+            (one.classification, one.savings_effect, one.subcategory, one.budget_bucket,
+             one.categorized_by_rule, one.review_status),
+            ('TRANSFER', 'CONTRIBUTION', self.fund, 'SAVINGS', rule, ReviewStatus.NOT_REQUIRED),
+        )
+        self.assertEqual((two.savings_effect, two.subcategory, two.categorized_by_rule), ('WITHDRAWAL', self.goal, withdrawal))
+        self.assertEqual((three.classification, three.review_status), ('EXPENSE', ReviewStatus.PENDING))
+
+    def test_import_conflict_and_possible_duplicate_stay_in_review(self):
+        self.savings_rule()
+        self.savings_rule(value='AUTO', match_type=RuleMatchType.CONTAINS, effect=SavingsEffect.WITHDRAWAL)
+        content = b'Date,Description,Type,Amount,Status\n2026-03-05,AUTO SAVE * 1,TRANSFER_OUT,-1.00,Posted\n'
+        preview = self.preview(content)
+        row = preview.data['valid_rows'][0]
+        self.assertEqual(row['categorization']['status'], 'RULE_CONFLICT')
+        self.assertEqual(preview.data['review_required_row_count'], 1)
+        self.client.post(
+            '/api/imports/',
+            {'account': self.account.id, 'file': SimpleUploadedFile('s.csv', content, content_type='text/csv')},
+            format='multipart',
+        )
+        record = Transaction.objects.get()
+        self.assertEqual((record.classification, record.savings_effect), ('UNKNOWN', SavingsEffect.NONE))
+        self.assertTrue(record.categorization_rule_conflict)
+        self.assertEqual(record.review_status, ReviewStatus.PENDING)
+
+        CategorizationRule.objects.all().delete()
+        Transaction.objects.all().delete()
+        self.savings_rule()
+        self.txn(description='AUTO SAVE * 1', classification='EXPENSE', amount='-1.00')
+        dup = self.preview(content)
+        self.assertEqual(dup.data['valid_rows'][0]['overlap_status'], 'POSSIBLE_DUPLICATE')
+        self.assertEqual(dup.data['valid_rows'][0]['categorization']['status'], 'AUTO_SAVINGS_TRANSFER')
+        self.assertEqual(dup.data['review_required_row_count'], 1)
+
+    # --- apply to pending ---
+    def test_apply_to_pending_spans_pages_skips_resolved_and_recomputes_review(self):
+        rule = self.savings_rule()
+        unknowns = [self.txn(description=f'AUTO SAVE * {i}') for i in range(103)]
+        loose_transfer = self.txn(classification='TRANSFER', description='AUTO SAVE * T')
+        manual = self.txn(classification='TRANSFER', description='AUTO SAVE * M',
+                          savings_effect=SavingsEffect.WITHDRAWAL, subcategory=self.goal)
+        manual.mark_reviewed()
+        reviewed_transfer = self.txn(classification='TRANSFER', description='AUTO SAVE * R')
+        reviewed_transfer.mark_reviewed()
+        expense = self.txn(classification='EXPENSE', description='AUTO SAVE * E', subcategory=self.wants)
+        duplicate = self.txn(description='AUTO SAVE * D', duplicate_resolution=DuplicateResolution.UNRESOLVED)
+
+        counts = self.client.get(f'/api/categorization-rules/{rule.id}/pending-matches/')
+        self.assertEqual(counts.data['matching_pending_count'], 105)
+        response = self.client.post(f'/api/categorization-rules/{rule.id}/apply-to-pending/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['updated_count'], 105)
+
+        unknowns[102].refresh_from_db()
+        self.assertEqual(
+            (unknowns[102].classification, unknowns[102].savings_effect, unknowns[102].subcategory,
+             unknowns[102].budget_bucket, unknowns[102].categorized_by_rule, unknowns[102].review_status),
+            ('TRANSFER', 'CONTRIBUTION', self.fund, 'SAVINGS', rule, ReviewStatus.NOT_REQUIRED),
+        )
+        loose_transfer.refresh_from_db()
+        self.assertEqual(loose_transfer.review_status, ReviewStatus.NOT_REQUIRED)
+        duplicate.refresh_from_db()
+        self.assertEqual(duplicate.savings_effect, SavingsEffect.CONTRIBUTION)
+        self.assertEqual(duplicate.review_status, ReviewStatus.PENDING)
+        for untouched, effect in ((manual, SavingsEffect.WITHDRAWAL), (reviewed_transfer, SavingsEffect.NONE)):
+            untouched.refresh_from_db()
+            self.assertEqual(untouched.savings_effect, effect)
+            self.assertIsNone(untouched.categorized_by_rule)
+        expense.refresh_from_db()
+        self.assertEqual((expense.classification, expense.subcategory), ('EXPENSE', self.wants))
+
+    def test_apply_skips_conflicting_candidates_and_unusable_rules_are_rejected(self):
+        rule = self.savings_rule()
+        self.savings_rule(value='AUTO SAVE *', effect=SavingsEffect.WITHDRAWAL)  # conflicting rule
+        record = self.txn()
+        counts = self.client.get(f'/api/categorization-rules/{rule.id}/pending-matches/')
+        self.assertEqual((counts.data['matching_pending_count'], counts.data['conflicting_pending_count']), (0, 1))
+        self.fund.is_active = False
+        self.fund.save()
+        response = self.client.post(f'/api/categorization-rules/{rule.id}/apply-to-pending/')
+        self.assertEqual(response.status_code, 400)
+        record.refresh_from_db()
+        self.assertEqual(record.classification, 'UNKNOWN')
+
+    # --- provenance ---
+    def test_manual_edit_clears_provenance_and_rule_edits_do_not_rewrite_history(self):
+        rule = self.savings_rule()
+        self.client.post(f'/api/categorization-rules/{rule.id}/apply-to-pending/')
+        record = self.txn()
+        self.client.post(f'/api/categorization-rules/{rule.id}/apply-to-pending/')
+        record.refresh_from_db()
+        self.assertEqual(record.categorized_by_rule, rule)
+        self.client.patch(f'/api/categorization-rules/{rule.id}/', {'is_active': False}, format='json')
+        record.refresh_from_db()
+        self.assertEqual(record.categorized_by_rule, rule)
+        self.assertEqual(record.savings_effect, SavingsEffect.CONTRIBUTION)
+        record.savings_effect = SavingsEffect.WITHDRAWAL
+        record.save()
+        record.refresh_from_db()
+        self.assertIsNone(record.categorized_by_rule)
+
+    def test_rule_with_provenance_cannot_be_deleted(self):
+        rule = self.savings_rule()
+        self.txn()
+        self.client.post(f'/api/categorization-rules/{rule.id}/apply-to-pending/')
+        self.assertEqual(self.client.delete(f'/api/categorization-rules/{rule.id}/').status_code, 409)
+
+    # --- accounting parity / reconciliation ---
+    def test_rule_generated_savings_reports_identically_to_manual_and_leaves_review(self):
+        rule = self.savings_rule()
+        withdrawal = self.savings_rule(value='AUTO PULL', effect=SavingsEffect.WITHDRAWAL)
+        self.txn(description='AUTO SAVE * 1', amount='-100.00')
+        self.txn(description='AUTO PULL * 1', amount='40.00')
+        for current in (rule, withdrawal):
+            self.client.post(f'/api/categorization-rules/{current.id}/apply-to-pending/')
+        urls = (
+            '/api/reports/all-time/',
+            '/api/reports/yearly/?year=2026',
+            '/api/reports/monthly/?year=2026&month=3',
+        )
+        automated = [self.client.get(url).json() for url in urls]
+        Transaction.objects.all().delete()
+        for description, amount, effect, target in (
+            ('AUTO SAVE * 1', '-100.00', SavingsEffect.CONTRIBUTION, self.fund),
+            ('AUTO PULL * 1', '40.00', SavingsEffect.WITHDRAWAL, self.fund),
+        ):
+            manual = self.txn(description=description, amount=amount, classification='TRANSFER',
+                              savings_effect=effect, subcategory=target)
+            manual.mark_reviewed()
+        for url, expected in zip(urls, automated):
+            actual = self.client.get(url).json()
+            self.assertEqual(actual['summary'], expected['summary'], url)
+            self.assertEqual(actual['data_completeness'], expected['data_completeness'], url)
+            self.assertFalse(actual['data_completeness']['is_incomplete'])
+        self.assertEqual(automated[0]['summary']['savings_contributions']['amount'], '100.00')
+
+    def test_rule_completed_rows_are_not_in_review_and_not_report_blockers(self):
+        rule = self.savings_rule()
+        record = self.txn()
+        self.client.post(f'/api/categorization-rules/{rule.id}/apply-to-pending/')
+        pending = {item['id'] for item in self.client.get('/api/transactions/?review_status=PENDING').json()['results']}
+        self.assertNotIn(record.pk, pending)
+        self.assertFalse(self.client.get('/api/reports/all-time/').json()['data_completeness']['is_incomplete'])
+
+
+class RuleKindMigrationTests(TransactionTestCase):
+    def test_existing_expense_rules_become_expense_category_rules(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate([('finance', '0009_repair_stale_review_state')])
+        apps = executor.loader.project_state([('finance', '0009_repair_stale_review_state')]).apps
+        subcategory = apps.get_model('finance', 'Subcategory').objects.create(name='Legacy', budget_bucket='WANTS')
+        rule_id = apps.get_model('finance', 'CategorizationRule').objects.create(
+            match_value='LEGACY', subcategory_id=subcategory.pk,
+        ).pk
+        try:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
+            rule = CategorizationRule.objects.get(pk=rule_id)
+            self.assertEqual(
+                (rule.rule_kind, rule.classification, rule.savings_effect, rule.match_type),
+                ('EXPENSE_CATEGORY', 'EXPENSE', SavingsEffect.NONE, 'CONTAINS'),
+            )
+        finally:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())

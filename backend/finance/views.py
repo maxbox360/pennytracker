@@ -27,6 +27,9 @@ from .csv_imports import (
 )
 from .categorization_rules import (
     apply_rule_to_transaction,
+    import_row_needs_review,
+    pending_candidates,
+    rule_is_usable,
     evaluate_import_rows,
     evaluate_rules,
     pending_matches_for_rule,
@@ -327,7 +330,7 @@ class CategorizationRuleViewSet(ModelViewSet):
     @action(detail=True, methods=['get'], url_path='pending-matches')
     def pending_matches(self, request, pk=None):
         rule = self.get_object()
-        if not rule.is_active or not rule.subcategory.is_active:
+        if not rule_is_usable(rule):
             return Response({
                 'matching_pending_count': 0,
                 'conflicting_pending_count': 0,
@@ -349,20 +352,12 @@ class CategorizationRuleViewSet(ModelViewSet):
                 )
                 if not rule.is_active:
                     raise ValidationError({'detail': 'Enable this rule before applying it.'})
-                if not rule.subcategory.is_active:
-                    raise ValidationError({'detail': 'Reactivate the target subcategory before applying this rule.'})
-                if rule.subcategory.budget_bucket not in (BudgetBucket.NEEDS, BudgetBucket.WANTS):
-                    raise ValidationError({'detail': 'Expense rules require a Needs or Wants target subcategory.'})
-                if rule.classification != TransactionClassification.EXPENSE:
-                    raise ValidationError({'detail': 'Only Expense rules can be applied.'})
+                if not rule_is_usable(rule):
+                    raise ValidationError({
+                        'detail': 'Reactivate a valid target subcategory before applying this rule.'
+                    })
                 rules = rules_for_evaluation()
-                candidates = list(
-                    Transaction.objects.select_for_update().filter(
-                        review_status=ReviewStatus.PENDING,
-                        classification=TransactionClassification.EXPENSE,
-                        subcategory__isnull=True,
-                    ).order_by('pk')
-                )
+                candidates = list(pending_candidates(rule).select_for_update().order_by('pk'))
                 matches, conflicts = pending_matches_for_rule(rule, candidates=candidates, rules=rules)
                 for transaction_record in matches:
                     result = evaluate_rules(
@@ -785,7 +780,7 @@ def preview_import(request):
     new_count = sum(row['overlap_status'] == 'NEW' for row in rows)
     represented_count = sum(row['overlap_status'] == 'ALREADY_REPRESENTED' for row in rows)
     possible_count = sum(row['overlap_status'] == 'POSSIBLE_DUPLICATE' for row in rows)
-    review_count = sum(_import_row_needs_review(row) for row in rows)
+    review_count = sum(import_row_needs_review(row) for row in rows)
     return Response({
         'account': {'id': account.id, 'name': account.name},
         'filename': filename,
@@ -828,37 +823,20 @@ def preview_import(request):
     })
 
 
-def _import_row_needs_review(row):
-    if row['overlap_status'] == 'ALREADY_REPRESENTED':
-        return False
-    if row['overlap_status'] == 'POSSIBLE_DUPLICATE':
-        return True
-    classification = row['classification']
-    if classification in (
-        TransactionClassification.UNKNOWN,
-        TransactionClassification.REFUND,
-        TransactionClassification.TRANSFER,
-    ):
-        return True
-    return (
-        classification == TransactionClassification.EXPENSE
-        and (
-            row['_categorization']['subcategory'] is None
-            or row['_categorization']['conflict']
-        )
-    )
-
-
 def _preview_categorization(row):
     result = row['_categorization']
     if result['conflict']:
         status_value = 'RULE_CONFLICT'
+    elif result['classification']:
+        status_value = 'AUTO_SAVINGS_TRANSFER'
     elif result['subcategory']:
         status_value = 'AUTO_CATEGORIZED'
     else:
         status_value = 'NOT_CATEGORIZED'
     return {
         'status': status_value,
+        'classification': result['classification'],
+        'savings_effect': result['savings_effect'],
         'subcategory': (
             {
                 'id': result['subcategory'].id,
@@ -869,7 +847,10 @@ def _preview_categorization(row):
         ),
         'rules': [{
             'id': rule.id,
+            'rule_kind': rule.rule_kind,
+            'match_type': rule.match_type,
             'match_value': rule.match_value,
+            'savings_effect': rule.savings_effect,
             'subcategory_name': rule.subcategory.name,
         } for rule in result['rules']],
     }

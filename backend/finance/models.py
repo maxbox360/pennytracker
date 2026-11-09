@@ -53,11 +53,18 @@ class RuleMatchField(models.TextChoices):
 
 class RuleMatchType(models.TextChoices):
     CONTAINS = 'CONTAINS', 'Contains'
+    STARTS_WITH = 'STARTS_WITH', 'Starts with'
     EQUALS = 'EQUALS', 'Equals'
+
+
+class RuleKind(models.TextChoices):
+    EXPENSE_CATEGORY = 'EXPENSE_CATEGORY', 'Expense categorization'
+    SAVINGS_TRANSFER = 'SAVINGS_TRANSFER', 'Savings transfer'
 
 
 class RuleClassification(models.TextChoices):
     EXPENSE = TransactionClassification.EXPENSE, 'Expense'
+    TRANSFER = TransactionClassification.TRANSFER, 'Transfer'
 
 
 class Account(models.Model):
@@ -146,15 +153,26 @@ class CategorizationRule(models.Model):
         default=RuleMatchField.RAW_DESCRIPTION,
     )
     match_type = models.CharField(
-        max_length=10,
+        max_length=12,
         choices=RuleMatchType.choices,
         default=RuleMatchType.CONTAINS,
     )
     match_value = models.CharField(max_length=200)
+    rule_kind = models.CharField(
+        max_length=20,
+        choices=RuleKind.choices,
+        default=RuleKind.EXPENSE_CATEGORY,
+    )
+    # EXPENSE_CATEGORY: required classification (never changed). SAVINGS_TRANSFER: resulting classification.
     classification = models.CharField(
         max_length=10,
         choices=RuleClassification.choices,
         default=RuleClassification.EXPENSE,
+    )
+    savings_effect = models.CharField(
+        max_length=12,
+        choices=SavingsEffect.choices,
+        default=SavingsEffect.NONE,
     )
     subcategory = models.ForeignKey(
         Subcategory,
@@ -180,10 +198,25 @@ class CategorizationRule(models.Model):
                 condition=Q(classification__in=RuleClassification.values),
                 name='valid_rule_classification',
             ),
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        rule_kind=RuleKind.EXPENSE_CATEGORY,
+                        classification=TransactionClassification.EXPENSE,
+                        savings_effect=SavingsEffect.NONE,
+                    )
+                    | Q(
+                        rule_kind=RuleKind.SAVINGS_TRANSFER,
+                        classification=TransactionClassification.TRANSFER,
+                        savings_effect__in=(SavingsEffect.CONTRIBUTION, SavingsEffect.WITHDRAWAL),
+                    )
+                ),
+                name='valid_rule_kind_action',
+            ),
         ]
 
     def __str__(self):
-        return self.name.strip() or f'{self.classification} description contains "{self.match_value}"'
+        return self.name.strip() or f'{self.rule_kind} description {self.match_type} "{self.match_value}"'
 
 
 class BudgetTargetSettings(models.Model):
@@ -391,6 +424,7 @@ class Transaction(models.Model):
             previous = type(self).objects.filter(pk=self.pk).values(
                 'classification',
                 'subcategory_id',
+                'savings_effect',
                 'categorized_by_rule_id',
                 'review_status',
             ).first()
@@ -403,7 +437,9 @@ class Transaction(models.Model):
             and not subcategory_changed
         )
         if previous is not None and (
-            classification_changed or subcategory_changed
+            classification_changed
+            or subcategory_changed
+            or previous['savings_effect'] != self.savings_effect
         ) and self.categorized_by_rule_id == previous['categorized_by_rule_id']:
             self.categorized_by_rule = None
             changed_fields.add('categorized_by_rule')
@@ -470,7 +506,7 @@ class Transaction(models.Model):
             self.review_status = ReviewStatus.PENDING
         elif self.classification == TransactionClassification.TRANSFER and (
             previous is None or previous['classification'] != self.classification
-        ):
+        ) and not (self.categorized_by_rule_id and self.savings_effect != SavingsEffect.NONE):
             self.review_status = ReviewStatus.PENDING
         elif previous is None:
             self.review_status = (

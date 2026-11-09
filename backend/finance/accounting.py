@@ -171,6 +171,12 @@ def _count_metric(metric):
 
 
 def _eligibility_blockers():
+    # Confirmed duplicates are resolved and never block, matching Transaction.review_blockers().
+    not_duplicate = ~Q(duplicate_resolution=DuplicateResolution.CONFIRMED_DUPLICATE)
+    return {reason: condition & not_duplicate for reason, condition in _raw_blockers().items()}
+
+
+def _raw_blockers():
     return {
         'UNRESOLVED_DUPLICATE': Q(duplicate_resolution=DuplicateResolution.UNRESOLVED),
         'RULE_CONFLICT': Q(categorization_rule_conflict=True),

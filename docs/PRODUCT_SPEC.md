@@ -361,6 +361,17 @@ Categorization rules assign a subcategory only. They never infer or change finan
 
 The Review editor may offer “Remember this for future matching expenses,” but the user must opt in and inspect/edit the exact match value before the rule is saved. The default proposed value is the full raw description; PennyTracker does not guess a shorter merchant token.
 
+
+## Savings transfer rules
+
+Rules have an explicit `rule_kind`. `EXPENSE_CATEGORY` rules (all pre-existing rules, migrated by default) are described above and never change classification. `SAVINGS_TRANSFER` rules are a deliberate exception: they define the whole meaning of a matching transaction as `classification = TRANSFER`, a `savings_effect` of `CONTRIBUTION` or `WITHDRAWAL`, and an active BUDGET-scoped SAVINGS Subcategory (whose bucket is snapshotted). Example (synthetic): `description starts with "AUTO SAVE *"` → Transfer → Contribution → Emergency Fund. No description is built into PennyTracker.
+
+Both kinds support `contains` and `starts with` on the raw description, using the same normalization (trim, collapse whitespace, case-insensitive, punctuation preserved). `starts with` compares the normalized prefix; a match in the middle does not qualify. No regex or fuzzy matching.
+
+Eligibility is determined by the transaction's current state: Expense rules apply only to EXPENSE; Savings rules apply only to UNKNOWN, or to a pending TRANSFER with `savings_effect = NONE` and no Subcategory. Savings rules never apply to Expense, Income, Refund, Excluded, Other Inflow, or an already-resolved Transfer, so the two kinds never compete. Savings rules that match with the same effect and Subcategory apply that shared outcome; any difference in effect or Subcategory is a rule conflict that sends the transaction to Review with nothing assigned. The lowest rule ID is only representative provenance. Two active rules of the same kind with the same normalized condition are rejected.
+
+Import preview and confirmation share one evaluator and one Review-status decision. A clean rule-completed Savings transfer is `NOT_REQUIRED`; a possible duplicate or rule conflict stays `PENDING`. Explicit apply-to-pending searches the whole ledger, never overwrites a resolved transaction, and recomputes Review state. Manual edits (including to the Savings effect) clear rule provenance. Reporting is unchanged: the rule only writes ordinary Transaction fields. Creating Savings rules from the Review editor is deferred.
+
 Rules apply during import preview and confirmation. A single matching rule assigns its active Needs/Wants target and snapshots the target's current bucket. Multiple matching rules with the same target may assign it; the lowest-ID match is stored only as representative provenance. Multiple matching rules with different targets assign nothing and require Review. Preview identifies conflicting rules/categories before confirmation. Confirmation recomputes the decision server-side.
 
 Creating or editing a rule never silently recategorizes existing transactions. The user may explicitly apply a rule to currently pending, uncategorized matching Expenses; this operation searches the full ledger, skips conflicts and existing category assignments, preserves unrelated Review blockers, and is atomic. Clean auto-categorized imports may become `NOT_REQUIRED`, not `REVIEWED`; possible duplicates remain `PENDING`.

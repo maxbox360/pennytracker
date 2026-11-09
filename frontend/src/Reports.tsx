@@ -233,7 +233,21 @@ function SummaryTable({
   )
 }
 
-function CompletenessNotice({ completeness }: { completeness: Completeness }) {
+const blockerReviewReasons: Record<string, string> = {
+  UNKNOWN: 'UNKNOWN',
+  UNCATEGORIZED: 'UNCATEGORIZED',
+  RULE_CONFLICT: 'RULE_CONFLICT',
+  UNRESOLVED_DUPLICATE: 'POSSIBLE_DUPLICATE',
+  TRANSFER_SAVINGS_UNREVIEWED: 'TRANSFER',
+}
+
+function CompletenessNotice({
+  completeness,
+  onReview,
+}: {
+  completeness: Completeness
+  onReview: (reason: string) => void
+}) {
   if (!completeness.is_incomplete) return null
   return (
     <aside className="report-completeness" role="status">
@@ -241,7 +255,12 @@ function CompletenessNotice({ completeness }: { completeness: Completeness }) {
       <span>Reported totals may be incomplete.</span>
       <ul>
         {Object.entries(completeness.blockers).map(([code, value]) => (
-          <li key={code}>{blockerLabels[code] || code}: {value.transaction_count}</li>
+          <li key={code}>
+            {blockerLabels[code] || code}: {value.transaction_count}
+            {blockerReviewReasons[code] && (
+              <> · <button type="button" className="link-button" onClick={() => onReview(blockerReviewReasons[code])}>Review</button></>
+            )}
+          </li>
         ))}
       </ul>
     </aside>
@@ -498,7 +517,7 @@ function isMonthlyReport(report: AllTimeReport | YearReport | MonthlyReport): re
   return 'month' in report.period
 }
 
-export default function Reports({ reload }: { reload: number }) {
+export default function Reports({ reload, onReview }: { reload: number; onReview: (reason: string) => void }) {
   const [level, setLevel] = useState<'all' | 'year' | 'month'>('all')
   const [year, setYear] = useState<number | null>(null)
   const [month, setMonth] = useState<number | null>(null)
@@ -721,7 +740,7 @@ export default function Reports({ reload }: { reload: number }) {
       {notice && <p className="table-notice" role="status">{notice}</p>}
       {report && summary && (
         <>
-          <CompletenessNotice completeness={report.data_completeness} />
+          <CompletenessNotice completeness={report.data_completeness} onReview={onReview} />
           {level === 'month' && isMonthlyReport(report) ? (
             <div className="report-summary-layout">
               <SummaryTable summary={summary} openDrill={openDrill} />

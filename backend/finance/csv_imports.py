@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from django.db import IntegrityError, transaction
 
-from .categorization_rules import evaluate_import_rows
+from .categorization_rules import evaluate_import_rows, import_row_needs_review
 from .models import (
     Account,
     DuplicateResolution,
@@ -166,7 +166,8 @@ def commit_import(account: Account, filename: str, content: bytes, parsed: Parse
                     raw_description=row['raw_description'],
                     amount=row['amount'],
                     source_type=row['source_type'],
-                    classification=row['classification'],
+                    classification=row['_categorization']['classification'] or row['classification'],
+                    savings_effect=row['_categorization']['savings_effect'],
                     subcategory_id=(
                         row['_categorization']['subcategory'].pk
                         if row['_categorization']['subcategory'] else None
@@ -182,19 +183,7 @@ def commit_import(account: Account, filename: str, content: bytes, parsed: Parse
                     categorization_rule_conflict=row['_categorization']['conflict'],
                     review_status=(
                         ReviewStatus.PENDING
-                        if row['overlap_status'] == 'POSSIBLE_DUPLICATE'
-                        or row['classification'] in (
-                            TransactionClassification.UNKNOWN,
-                            TransactionClassification.REFUND,
-                            TransactionClassification.TRANSFER,
-                        )
-                        or (
-                            row['classification'] == TransactionClassification.EXPENSE
-                            and (
-                                not row['_categorization']['subcategory']
-                                or row['_categorization']['conflict']
-                            )
-                        )
+                        if import_row_needs_review(row)
                         else ReviewStatus.NOT_REQUIRED
                     ),
                     duplicate_resolution=(

@@ -29,9 +29,18 @@ type Preview = {
     overlap_status: 'NEW' | 'ALREADY_REPRESENTED' | 'POSSIBLE_DUPLICATE'
     overlap_reason: string
     categorization: {
-      status: 'AUTO_CATEGORIZED' | 'RULE_CONFLICT' | 'NOT_CATEGORIZED'
-      subcategory: { id: number; name: string; budget_bucket: 'NEEDS' | 'WANTS' } | null
-      rules: { id: number; match_value: string; subcategory_name: string }[]
+      status: 'AUTO_CATEGORIZED' | 'AUTO_SAVINGS_TRANSFER' | 'RULE_CONFLICT' | 'NOT_CATEGORIZED'
+      classification: Classification | null
+      savings_effect: 'NONE' | 'CONTRIBUTION' | 'WITHDRAWAL'
+      subcategory: { id: number; name: string; budget_bucket: 'NEEDS' | 'WANTS' | 'SAVINGS' } | null
+      rules: {
+        id: number
+        rule_kind: 'EXPENSE_CATEGORY' | 'SAVINGS_TRANSFER'
+        match_type: 'CONTAINS' | 'STARTS_WITH'
+        match_value: string
+        savings_effect: 'NONE' | 'CONTRIBUTION' | 'WITHDRAWAL'
+        subcategory_name: string
+      }[]
     }
     duplicate_candidates: {
       id: number
@@ -75,6 +84,7 @@ function formatAmount(amount: string) {
 
 function App() {
   const [reload, setReload] = useState(0)
+  const [reviewReason, setReviewReason] = useState('')
   const [view, setView] = useState<'transactions' | 'review' | 'categories' | 'rules' | 'reports'>('transactions')
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem('pennytracker-theme')
@@ -107,6 +117,14 @@ function App() {
       })
   }, [showImport])
 
+  function closeImport() {
+    setShowImport(false)
+    setPreview(null)
+    setFile(null)
+    setAccountId('')
+    setImportError('')
+  }
+
   async function submitImport(action: 'preview' | 'confirm') {
     if (!file || !accountId) return
     setImportError('')
@@ -126,7 +144,7 @@ function App() {
         setPreview(result as Preview)
       } else {
         setImportResult(result as ImportResult)
-        setPreview(null)
+        closeImport()
         setReload((current) => current + 1)
       }
     } catch (requestError) {
@@ -135,6 +153,8 @@ function App() {
       setImporting(false)
     }
   }
+
+  const previewing = view === 'transactions' && preview !== null
 
   return (
     <div className="app-shell">
@@ -156,7 +176,7 @@ function App() {
             className={`nav-item ${view === 'review' ? 'nav-item--active' : ''}`}
             type="button"
             aria-current={view === 'review' ? 'page' : undefined}
-            onClick={() => setView('review')}
+            onClick={() => { setReviewReason(''); setView('review') }}
           >
             Review
           </button>
@@ -201,9 +221,11 @@ function App() {
       <main className="main-content">
         <header className="page-header">
           <div>
-            <h1>{view === 'review' ? 'Review' : view === 'categories' ? 'Categories' : view === 'rules' ? 'Rules' : view === 'reports' ? 'Reports' : 'Transactions'}</h1>
+            <h1>{previewing ? 'Import preview' : view === 'review' ? 'Review' : view === 'categories' ? 'Categories' : view === 'rules' ? 'Rules' : view === 'reports' ? 'Reports' : 'Transactions'}</h1>
             <p className="page-description">
-              {view === 'review'
+              {previewing
+                ? 'Review the rows below, then confirm or close without importing.'
+                : view === 'review'
                 ? 'Resolve unknown classifications, uncategorized activity, and possible duplicates.'
                 : view === 'categories'
                   ? 'Manage the subcategories used to organize transactions.'
@@ -216,24 +238,51 @@ function App() {
           </div>
           {view !== 'categories' && view !== 'rules' && (
             <div className="page-actions">
-              <button className="secondary-button" type="button" onClick={() => setReload((current) => current + 1)}>
-                Refresh
-              </button>
-              {view === 'transactions' && (
+              {!previewing && (
+                <button className="secondary-button" type="button" onClick={() => setReload((current) => current + 1)}>
+                  Refresh
+                </button>
+              )}
+              {previewing && (
                 <button
                   className="primary-button"
                   type="button"
+                  disabled={!preview.can_import || importing}
+                  onClick={() => void submitImport('confirm')}
+                >
+                  {importing ? 'Importing…' : 'Confirm import'}
+                </button>
+              )}
+              {view === 'transactions' && (
+                <button
+                  className={previewing ? 'secondary-button' : 'primary-button'}
+                  type="button"
+                  disabled={previewing && importing}
                   onClick={() => {
-                    setShowImport((shown) => !shown)
-                    setImportError('')
+                    if (showImport) {
+                      closeImport()
+                    } else {
+                      setShowImport(true)
+                      setImportResult(null)
+                      setImportError('')
+                    }
                   }}
                 >
-                  {showImport ? 'Close import' : 'Import CSV'}
+                  {previewing ? 'Close import' : showImport ? 'Cancel import' : 'Import CSV'}
                 </button>
               )}
             </div>
           )}
         </header>
+
+        {importResult && !showImport && view === 'transactions' && (
+          <p className="import-success" role="status">
+            Imported {importResult.imported_row_count} new or possible-duplicate rows; skipped
+            {' '}{importResult.already_represented_row_count} already represented rows from
+            {' '}{importResult.filename} into {importResult.account}.
+            {' '}<button type="button" className="link-button" onClick={() => setImportResult(null)}>Dismiss</button>
+          </p>
+        )}
 
         {showImport && view === 'transactions' && (
           <section className="import-card" aria-labelledby="import-heading">
@@ -243,6 +292,7 @@ function App() {
                 <p>Select the destination account; the filename is kept for reference only.</p>
               </div>
             </div>
+            {!preview && (
             <div className="import-controls">
               <label>
                 Account
@@ -279,19 +329,13 @@ function App() {
                 {importing ? 'Working…' : 'Preview'}
               </button>
             </div>
+            )}
 
             {importError && <p className="message message--error" role="alert">{importError}</p>}
-            {importResult && (
-              <p className="import-success" role="status">
-                Imported {importResult.imported_row_count} new or possible-duplicate rows; skipped
-                {' '}{importResult.already_represented_row_count} already represented rows from
-                {' '}{importResult.filename} into {importResult.account}.
-              </p>
-            )}
             {preview && (
               <div className="preview-content">
                 <p className="preview-summary">
-                  {preview.source_row_count} source rows · {preview.new_row_count} new ·
+                  {preview.filename} · {preview.source_row_count} source rows · {preview.new_row_count} new ·
                   {' '}{preview.already_represented_row_count} already represented ·
                   {' '}{preview.possible_duplicate_row_count} possible duplicates ·
                   {' '}{preview.invalid_row_count} invalid ·
@@ -346,10 +390,21 @@ function App() {
                                   {' '}({row.categorization.rules.length} matching rule{row.categorization.rules.length === 1 ? '' : 's'})
                                 </small>
                               )}
+                              {row.categorization.status === 'AUTO_SAVINGS_TRANSFER' && row.categorization.subcategory && (
+                                <small className="categorization-preview">
+                                  Auto Savings transfer: Transfer · {row.categorization.savings_effect === 'CONTRIBUTION' ? 'Contribution' : 'Withdrawal'}
+                                  {' '}· {row.categorization.subcategory.name}
+                                  {' '}({row.categorization.rules.length} matching rule{row.categorization.rules.length === 1 ? '' : 's'})
+                                </small>
+                              )}
                               {row.categorization.status === 'RULE_CONFLICT' && (
                                 <small className="categorization-conflict">
                                   Rule conflict — requires Review:
-                                  {' '}{[...new Set(row.categorization.rules.map((rule) => rule.subcategory_name))].join(', ')}
+                                  {' '}{[...new Set(row.categorization.rules.map((rule) => (
+                                    rule.rule_kind === 'SAVINGS_TRANSFER'
+                                      ? `${rule.savings_effect === 'CONTRIBUTION' ? 'Contribution' : 'Withdrawal'} → ${rule.subcategory_name}`
+                                      : rule.subcategory_name
+                                  )))].join(', ')}
                                 </small>
                               )}
                             </td>
@@ -376,26 +431,20 @@ function App() {
                     <p>No rows will be imported until every row is valid.</p>
                   </div>
                 )}
-                <button
-                  className="primary-button"
-                  type="button"
-                  disabled={!preview.can_import || importing}
-                  onClick={() => void submitImport('confirm')}
-                >
-                  {importing ? 'Importing…' : 'Confirm import'}
-                </button>
               </div>
             )}
           </section>
         )}
 
         {view === 'reports'
-          ? <Reports reload={reload} />
+          ? <Reports reload={reload} onReview={(reason) => { setReviewReason(reason); setView('review') }} />
           : view === 'categories'
           ? <Categories />
           : view === 'rules'
             ? <Rules reload={reload} onChanged={() => setReload((current) => current + 1)} />
-            : <TransactionTable mode={view} reload={reload} />}
+            : previewing
+              ? null
+              : <TransactionTable key={`${view}-${reviewReason}`} mode={view} reload={reload} initialReason={view === 'review' ? reviewReason : ''} />}
       </main>
     </div>
   )

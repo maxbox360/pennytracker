@@ -1604,3 +1604,13 @@ td.amount-cell {
     flex-direction: column;
   }
 }
+
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}

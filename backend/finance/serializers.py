@@ -7,6 +7,7 @@ from .models import (
     BudgetTargetSettings,
     CategorizationRule,
     ImportBatch,
+    RuleKind,
     RuleMatchField,
     RuleMatchType,
     SavingsEffect,
@@ -15,7 +16,13 @@ from .models import (
     Transaction,
     TransactionClassification,
 )
-from .categorization_rules import normalize_rule_text, stored_rule_value
+from .categorization_rules import (
+    KIND_CLASSIFICATION,
+    MATCH_TYPES,
+    normalize_rule_text,
+    stored_rule_value,
+    target_is_valid,
+)
 
 
 class ImportBatchSerializer(serializers.ModelSerializer):
@@ -126,7 +133,9 @@ class CategorizationRuleSerializer(serializers.ModelSerializer):
             'match_field',
             'match_type',
             'match_value',
+            'rule_kind',
             'classification',
+            'savings_effect',
             'subcategory',
             'subcategory_name',
             'subcategory_bucket',
@@ -152,45 +161,54 @@ class CategorizationRuleSerializer(serializers.ModelSerializer):
         values = {
             field: attrs.get(field, getattr(self.instance, field, default))
             for field, default in (
+                ('rule_kind', RuleKind.EXPENSE_CATEGORY),
                 ('match_field', RuleMatchField.RAW_DESCRIPTION),
                 ('match_type', RuleMatchType.CONTAINS),
-                ('classification', TransactionClassification.EXPENSE),
                 ('match_value', ''),
+                ('savings_effect', SavingsEffect.NONE),
                 ('subcategory', None),
                 ('is_active', True),
             )
         }
+        kind = values['rule_kind']
         errors = {}
+        expected_classification = KIND_CLASSIFICATION[kind]
+        if attrs.get('classification', expected_classification) != expected_classification:
+            errors['classification'] = f'{RuleKind(kind).label} rules require {expected_classification} classification.'
+        attrs['classification'] = expected_classification
         if values['match_field'] != RuleMatchField.RAW_DESCRIPTION:
             errors['match_field'] = 'Only raw description matching is supported.'
-        if values['match_type'] != RuleMatchType.CONTAINS:
-            errors['match_type'] = 'Only contains matching is supported.'
-        if values['classification'] != TransactionClassification.EXPENSE:
-            errors['classification'] = 'Categorization rules currently require Expense classification.'
+        if values['match_type'] not in MATCH_TYPES:
+            errors['match_type'] = 'Only contains and starts-with matching are supported.'
+        if kind == RuleKind.EXPENSE_CATEGORY:
+            if values['savings_effect'] != SavingsEffect.NONE:
+                errors['savings_effect'] = 'Expense rules cannot set a Savings effect.'
+            attrs['savings_effect'] = SavingsEffect.NONE
+        elif values['savings_effect'] not in (SavingsEffect.CONTRIBUTION, SavingsEffect.WITHDRAWAL):
+            errors['savings_effect'] = 'Choose Contribution or Withdrawal.'
         subcategory = values['subcategory']
+        label = 'Needs or Wants' if kind == RuleKind.EXPENSE_CATEGORY else 'Savings'
         if subcategory is None:
             errors['subcategory'] = 'Choose a subcategory.'
         else:
             target_unchanged = (
                 self.instance is not None
                 and self.instance.subcategory_id == subcategory.pk
+                and self.instance.rule_kind == kind
             )
-            target_is_usable = subcategory.is_active and (
-                subcategory.scope == SubcategoryScope.BUDGET
-                and subcategory.budget_bucket in (BudgetBucket.NEEDS, BudgetBucket.WANTS)
-            )
+            target_is_usable = subcategory.is_active and target_is_valid(kind, subcategory)
             if not target_unchanged and not subcategory.is_active:
                 errors['subcategory'] = 'Rules must target an active subcategory.'
             elif not target_unchanged and not target_is_usable:
-                errors['subcategory'] = 'Expense rules must target a Needs or Wants subcategory.'
+                errors['subcategory'] = f'{RuleKind(kind).label} rules must target a {label} subcategory.'
             elif attrs.get('is_active') is True and not target_is_usable:
-                errors['is_active'] = 'Reactivate a valid Needs/Wants target before enabling this rule.'
+                errors['is_active'] = f'Reactivate a valid {label} target before enabling this rule.'
 
         match_value = normalize_rule_text(values['match_value'])
         if values['is_active'] and match_value and not errors:
             duplicate_rules = CategorizationRule.objects.filter(
                 is_active=True,
-                classification=values['classification'],
+                rule_kind=kind,
                 match_field=values['match_field'],
                 match_type=values['match_type'],
             ).exclude(pk=self.instance.pk if self.instance else None)
