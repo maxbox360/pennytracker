@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:review-browser": "node tests/review-browser.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -326,59 +326,23 @@ depending on the transaction model we ultimately choose.
 
 ---
 
-# 5. Automatic categorization rules
+# 5. Transaction rules
 
-This is one of the most important features.
+Rules describe a deterministic transaction outcome: classification, optional Subcategory and Savings effect. Supported outcomes are Income, Expense and Refund with a Needs/Wants Subcategory, Other Inflow with an optional Other Inflow Subcategory, ordinary Transfer with no Subcategory, Savings Transfer with a contribution/withdrawal and Savings Subcategory, and Excluded. UNKNOWN is not an outcome.
 
-I want the application to remember categorization decisions so I do not have to recategorize the same merchants every month.
+Rules match the raw description by `contains` or `starts with`, case-insensitively after trimming and collapsing whitespace; punctuation is preserved. For example, `EXAMPLE EMPLOYER PAYROLL` may resolve to Income and `AUTO SAVE *` may resolve to a Savings contribution. Users choose and edit patterns; no merchant inference, regex, fuzzy matching or priority is used.
 
-Example:
+UNKNOWN may match any outcome. An Expense rule applies to uncategorized Expenses and, if its explicit `allow_unknown` flag is enabled, UNKNOWN rows. Existing Expense rules migrate with this flag off; newly created Expense rules default it on. Savings Transfer rules also apply to unresolved pending Transfers with no Subcategory, no Savings effect and no manual financial resolution. Other known or already assigned outcomes are never overwritten.
 
-If I categorize:
+Same-condition active rules with the same eligibility scope are rejected. Overlapping eligible rules with the same complete outcome apply it, with the lowest ID as representative provenance; different outcomes set a conflict and assign nothing. Preview and confirmation use the same evaluator; confirmation recomputes. Creation and editing never modify existing transactions. Explicit apply-to-pending scans the whole ledger atomically, preserves duplicate blockers and skips incompatible or manually resolved rows.
 
-`STARBUCKS`
+The Review editor can explicitly remember a valid financial outcome with an editable match mode and pattern. The transaction save and rule creation are atomic; the teaching transaction is manual, not attributed to the new rule. Existing automatic rule provenance is cleared by manual financial overrides. Rule edits and disabling never rewrite historical transactions or bucket snapshots; archived or incompatible target Subcategories make a rule unusable.
 
-as:
+An individual Review Save marks a transaction REVIEWED only after a financial outcome changes or is explicitly confirmed and no blockers remain. Notes-only, merchant-only and no-op saves do not complete review. Conflict resolution requires an explicit financial change or confirmation; unresolved duplicates and other blockers stay PENDING. Automatic clean results are NOT_REQUIRED. The separate Mark reviewed and bulk workflows remain available.
 
-`Coffee → Wants`
+`manually_resolved` records a deliberate human financial resolution, independently of Review status. It is set for explicit financial resolution or confirmation, retained while unrelated blockers remain, and reset when returned to UNKNOWN or an uncategorized Expense/Refund. It prevents Savings rules from overwriting an intentionally ordinary pending Transfer. Automatically resolved transactions do not set it; historical pending Transfers migrate as unresolved because their original intent is unknown.
 
-I should have the option to create a rule such as:
-
-> If merchant or description contains "STARBUCKS", categorize as Coffee.
-
-Other examples:
-
-`CASEY'S → Fuel`  
-`NETFLIX → Subscriptions`  
-`CHICK-FIL-A → Fast Food`  
-`CARROLL ELECTRIC → Electric`
-
-Rules must be visible, editable, disableable, and deliberately created by the user. The initial supported condition is **Expense + raw description contains a match value**; merchant matching is deferred until imports reliably populate clean merchant names. The model keeps generic match-field and match-type values for a later concrete need, but unsupported modes are rejected now.
-
-Matching trims outer whitespace, collapses internal whitespace runs, and compares case-insensitively. It does not strip punctuation, tokenize descriptions, or fuzzy-match. The same normalization is used for matching and duplicate-rule validation.
-
-Categorization rules assign a subcategory only. They never infer or change financial classification. Rules are classification-scoped, so an Expense rule does not categorize an UNKNOWN, INCOME, REFUND, TRANSFER, or EXCLUDED transaction. For example, an Expense rule matching `COFFEE SHOP` can categorize `COFFEE SHOP 1234`, but must not categorize `ROUNDUP *COFFEE SHOP 1234` classified UNKNOWN or TRANSFER.
-
-The Review editor may offer “Remember this for future matching expenses,” but the user must opt in and inspect/edit the exact match value before the rule is saved. The default proposed value is the full raw description; PennyTracker does not guess a shorter merchant token.
-
-
-## Savings transfer rules
-
-Rules have an explicit `rule_kind`. `EXPENSE_CATEGORY` rules (all pre-existing rules, migrated by default) are described above and never change classification. `SAVINGS_TRANSFER` rules are a deliberate exception: they define the whole meaning of a matching transaction as `classification = TRANSFER`, a `savings_effect` of `CONTRIBUTION` or `WITHDRAWAL`, and an active BUDGET-scoped SAVINGS Subcategory (whose bucket is snapshotted). Example (synthetic): `description starts with "AUTO SAVE *"` → Transfer → Contribution → Emergency Fund. No description is built into PennyTracker.
-
-Both kinds support `contains` and `starts with` on the raw description, using the same normalization (trim, collapse whitespace, case-insensitive, punctuation preserved). `starts with` compares the normalized prefix; a match in the middle does not qualify. No regex or fuzzy matching.
-
-Eligibility is determined by the transaction's current state: Expense rules apply only to EXPENSE; Savings rules apply only to UNKNOWN, or to a pending TRANSFER with `savings_effect = NONE` and no Subcategory. Savings rules never apply to Expense, Income, Refund, Excluded, Other Inflow, or an already-resolved Transfer, so the two kinds never compete. Savings rules that match with the same effect and Subcategory apply that shared outcome; any difference in effect or Subcategory is a rule conflict that sends the transaction to Review with nothing assigned. The lowest rule ID is only representative provenance. Two active rules of the same kind with the same normalized condition are rejected.
-
-Import preview and confirmation share one evaluator and one Review-status decision. A clean rule-completed Savings transfer is `NOT_REQUIRED`; a possible duplicate or rule conflict stays `PENDING`. Explicit apply-to-pending searches the whole ledger, never overwrites a resolved transaction, and recomputes Review state. Manual edits (including to the Savings effect) clear rule provenance. Reporting is unchanged: the rule only writes ordinary Transaction fields. Creating Savings rules from the Review editor is deferred.
-
-Rules apply during import preview and confirmation. A single matching rule assigns its active Needs/Wants target and snapshots the target's current bucket. Multiple matching rules with the same target may assign it; the lowest-ID match is stored only as representative provenance. Multiple matching rules with different targets assign nothing and require Review. Preview identifies conflicting rules/categories before confirmation. Confirmation recomputes the decision server-side.
-
-Creating or editing a rule never silently recategorizes existing transactions. The user may explicitly apply a rule to currently pending, uncategorized matching Expenses; this operation searches the full ledger, skips conflicts and existing category assignments, preserves unrelated Review blockers, and is atomic. Clean auto-categorized imports may become `NOT_REQUIRED`, not `REVIEWED`; possible duplicates remain `PENDING`.
-
-Automatic assignments retain the rule ID as lightweight provenance, not a live rule or condition snapshot. A manual category edit clears that reference and wins for that transaction. Rule edits, disabling, and removal do not change a transaction's stored subcategory or historical bucket snapshot. Rules with historical provenance references are disabled rather than deleted.
-
-Archived or Expense-incompatible target subcategories make a rule unusable without deleting or reactivating either object. Rules remain visible with a warning; reactivating an archived target or moving it back to Needs/Wants makes the rule usable again. Rules remain deterministic and do not use AI or machine learning.
+An ordinary Transfer has no Subcategory and no Savings effect. Existing Transfers with `NONE` and a Savings Subcategory are retained for historical integrity but new such assignments are rejected. Switching a Savings Transfer to `NONE` removes its Subcategory; changing classification clears incompatible Savings state. A counter-account need not be represented.
 
 ---
 

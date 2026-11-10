@@ -59,6 +59,12 @@ Implement one milestone at a time; keep the application runnable and verify each
 - Document future direction-derived Savings contributions/withdrawals and two-sided transfer pairing without implementing pairing, savings calculations, or reports.
 - Verified with 54 Django tests, frontend TypeScript/production build, no pending migrations, and the running Docker Compose paginated API/frontend smoke checks.
 
+## Current refinement — Transaction rules and individual Review
+
+- Rules now store a validated transaction outcome rather than a rule kind. Existing Expense rules remain limited to already-classified Expenses; new Expense rules may also resolve UNKNOWN.
+- Review can explicitly remember any supported complete outcome. Financial edits or explicit confirmation complete individual Review when no blockers remain; notes-only edits do not. Bulk Review behavior is unchanged.
+- Rule application remains explicit for pending ledger rows, preserves manual financial resolutions and duplicate blockers, and uses the same evaluator as import preview and confirmation. Reporting uses ordinary transaction fields without rule-specific accounting.
+
 ## Milestone 4 — Transparent categorization rules
 
 - Add visible, editable, disableable categorization rules scoped to `EXPENSE`; the initial match is raw description contains only.

@@ -32,6 +32,7 @@ from .categorization_rules import (
     rule_is_usable,
     evaluate_import_rows,
     evaluate_rules,
+    evaluate_transaction,
     pending_matches_for_rule,
     rules_for_evaluation,
 )
@@ -43,6 +44,7 @@ from .models import (
     DuplicateResolution,
     ImportBatch,
     ReviewStatus,
+    SavingsEffect,
     Subcategory,
     SubcategoryScope,
     Transaction,
@@ -389,12 +391,14 @@ class CategorizationRuleViewSet(ModelViewSet):
                 candidates = list(pending_candidates(rule).select_for_update().order_by('pk'))
                 matches, conflicts = pending_matches_for_rule(rule, candidates=candidates, rules=rules)
                 for transaction_record in matches:
-                    result = evaluate_rules(
-                        transaction_record.classification,
-                        transaction_record.raw_description,
-                        rules,
-                    )
+                    result = evaluate_transaction(transaction_record, rules)
                     apply_rule_to_transaction(transaction_record, result['rule'])
+                for transaction_record in conflicts:
+                    transaction_record.categorization_rule_conflict = True
+                    transaction_record.review_status = ReviewStatus.PENDING
+                    transaction_record.save(update_fields=(
+                        'categorization_rule_conflict', 'review_status', 'updated_at',
+                    ))
         except CategorizationRule.DoesNotExist:
             return Response({'detail': 'Categorization rule not found.'}, status=status.HTTP_404_NOT_FOUND)
         except DjangoValidationError as error:
@@ -453,6 +457,8 @@ class TransactionViewSet(ModelViewSet):
                     transaction_data['classification'] = request.data['classification']
                     if request.data['classification'] != TransactionClassification.TRANSFER:
                         transaction_data['savings_effect'] = Transaction.SavingsEffect.NONE
+                    elif 'savings_effect' in request.data:
+                        transaction_data['savings_effect'] = request.data['savings_effect']
                 transaction_serializer = TransactionSerializer(
                     transaction_record,
                     data=transaction_data,
@@ -470,35 +476,72 @@ class TransactionViewSet(ModelViewSet):
             'subcategory': SubcategorySerializer(subcategory).data,
         }, status=status.HTTP_201_CREATED)
 
+    def _save_review_transaction(self, request):
+        record = Transaction.objects.select_for_update().get(pk=self.get_object().pk)
+        if record.review_status != ReviewStatus.PENDING:
+            raise ValidationError({'detail': 'Only pending transactions can be saved as a Review action.'})
+        had_conflict = record.categorization_rule_conflict
+        data = {
+            key: request.data[key]
+            for key in ('classification', 'savings_effect', 'subcategory', 'merchant', 'notes')
+            if key in request.data
+        }
+        serializer = TransactionSerializer(record, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        before = (record.classification, record.subcategory_id, record.savings_effect)
+        record = serializer.save()
+        changed = before != (record.classification, record.subcategory_id, record.savings_effect)
+        explicit_conflict = request.data.get('resolve_rule_conflict', False)
+        confirm_financial = request.data.get('confirm_financial_outcome', False)
+        if not isinstance(explicit_conflict, bool):
+            raise ValidationError({'resolve_rule_conflict': 'Use true or false.'})
+        if not isinstance(confirm_financial, bool):
+            raise ValidationError({'confirm_financial_outcome': 'Use true or false.'})
+        complete = not record.financial_blockers()
+        if explicit_conflict and (not had_conflict or not complete):
+            raise ValidationError({'resolve_rule_conflict': 'Choose a complete financial outcome to resolve the conflict.'})
+        if confirm_financial and (not complete or (had_conflict and not (changed or explicit_conflict))):
+            raise ValidationError({'confirm_financial_outcome': 'Choose a complete financial outcome and resolve any conflict.'})
+        if changed or explicit_conflict or confirm_financial:
+            record.reconcile_financial_resolution()
+            if explicit_conflict or confirm_financial:
+                record.categorized_by_rule = None
+            if complete:
+                record.review_status = (
+                    ReviewStatus.PENDING if record.review_blockers() else ReviewStatus.REVIEWED
+                )
+            else:
+                record.review_status = ReviewStatus.PENDING
+            record.save(update_fields=(
+                'manually_resolved', 'categorized_by_rule', 'categorization_rule_conflict', 'review_status', 'updated_at',
+            ))
+        return record, changed or explicit_conflict or confirm_financial
+
+    @action(detail=True, methods=['post'], url_path='review-save')
+    def review_save(self, request, pk=None):
+        try:
+            with transaction.atomic():
+                record, _ = self._save_review_transaction(request)
+        except DjangoValidationError as error:
+            return Response({'detail': error.message_dict}, status=status.HTTP_400_BAD_REQUEST)
+        except ValidationError as error:
+            return Response(error.detail, status=status.HTTP_400_BAD_REQUEST)
+        return Response(TransactionSerializer(record).data)
+
     @action(detail=True, methods=['post'], url_path='save-with-rule')
     def save_with_rule(self, request, pk=None):
         try:
             with transaction.atomic():
-                transaction_record = self.get_object()
-                transaction_serializer = TransactionSerializer(
-                    transaction_record,
-                    data={
-                        key: request.data[key]
-                        for key in ('classification', 'savings_effect', 'subcategory', 'merchant', 'notes')
-                        if key in request.data
-                    },
-                    partial=True,
-                )
-                transaction_serializer.is_valid(raise_exception=True)
-                transaction_record = transaction_serializer.save()
-                if (
-                    transaction_record.classification != TransactionClassification.EXPENSE
-                    or transaction_record.subcategory_id is None
-                ):
-                    raise ValidationError({
-                        'subcategory': 'Assign an Expense subcategory before creating a rule.'
-                    })
+                transaction_record, resolved = self._save_review_transaction(request)
+                if not resolved:
+                    raise ValidationError({'detail': 'Resolve or explicitly confirm the financial outcome before creating a rule.'})
                 rule_serializer = CategorizationRuleSerializer(data={
                     'name': request.data.get('name', ''),
                     'match_field': request.data.get('match_field', 'RAW_DESCRIPTION'),
                     'match_type': request.data.get('match_type', 'CONTAINS'),
                     'match_value': request.data.get('match_value', ''),
-                    'classification': TransactionClassification.EXPENSE,
+                    'classification': transaction_record.classification,
+                    'savings_effect': transaction_record.savings_effect,
                     'subcategory': transaction_record.subcategory_id,
                     'is_active': True,
                 })
@@ -706,7 +749,12 @@ class TransactionViewSet(ModelViewSet):
                             'subcategory',
                             'budget_bucket',
                             'review_status',
+                            'manually_resolved',
                             'updated_at',
+                        ))
+                        record.reconcile_financial_resolution()
+                        record.save(update_fields=(
+                            'manually_resolved', 'categorization_rule_conflict', 'updated_at',
                         ))
                 elif operation == 'subcategory':
                     subcategory_id = request.data.get('subcategory')
@@ -734,6 +782,10 @@ class TransactionViewSet(ModelViewSet):
                             'categorization_rule_conflict',
                             'review_status',
                             'updated_at',
+                        ))
+                        record.reconcile_financial_resolution()
+                        record.save(update_fields=(
+                            'manually_resolved', 'categorization_rule_conflict', 'updated_at',
                         ))
                 elif operation == 'mark_reviewed':
                     blocked = {
@@ -856,10 +908,8 @@ def _preview_categorization(row):
     result = row['_categorization']
     if result['conflict']:
         status_value = 'RULE_CONFLICT'
-    elif result['classification']:
-        status_value = 'AUTO_SAVINGS_TRANSFER'
-    elif result['subcategory']:
-        status_value = 'AUTO_CATEGORIZED'
+    elif result['rule']:
+        status_value = 'AUTO_RESOLVED'
     else:
         status_value = 'NOT_CATEGORIZED'
     return {
@@ -876,11 +926,11 @@ def _preview_categorization(row):
         ),
         'rules': [{
             'id': rule.id,
-            'rule_kind': rule.rule_kind,
+            'classification': rule.classification,
             'match_type': rule.match_type,
             'match_value': rule.match_value,
             'savings_effect': rule.savings_effect,
-            'subcategory_name': rule.subcategory.name,
+            'subcategory_name': rule.subcategory.name if rule.subcategory else None,
         } for rule in result['rules']],
     }
 

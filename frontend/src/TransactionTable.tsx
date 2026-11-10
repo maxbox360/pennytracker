@@ -53,6 +53,9 @@ type Draft = {
   notes: string
   rememberRule: boolean
   ruleMatchValue: string
+  ruleMatchType: 'CONTAINS' | 'STARTS_WITH'
+  resolveConflict: boolean
+  confirmOutcome: boolean
 }
 type SortField = 'date' | 'description' | 'account' | 'source_type' | 'classification' | 'subcategory' | 'review_status' | 'amount'
 
@@ -115,6 +118,43 @@ function acceptsSubcategory(classification: Classification, subcategory: Subcate
     : subcategory.scope === 'BUDGET'
       && subcategory.budget_bucket !== null
       && acceptsBucket(classification, subcategory.budget_bucket)
+}
+
+function financialIntent(draft: Draft, original: Transaction) {
+  return draft.confirmOutcome || draft.resolveConflict
+    || draft.classification !== original.classification
+    || draft.savings_effect !== original.savings_effect
+    || (draft.subcategory ? Number(draft.subcategory) : null) !== original.subcategory
+}
+
+function canRememberOutcome(draft: Draft, subcategory: Subcategory | undefined) {
+  if (draft.classification === 'UNKNOWN') return false
+  if (draft.subcategory && (!subcategory?.is_active || !acceptsSubcategory(draft.classification, subcategory))) return false
+  if (draft.classification === 'EXPENSE' || draft.classification === 'REFUND') return Boolean(subcategory)
+  if (draft.classification === 'TRANSFER') {
+    return draft.savings_effect === 'NONE' ? !draft.subcategory : Boolean(subcategory)
+  }
+  return true
+}
+
+function ruleIneligibility(draft: Draft, subcategory: Subcategory | undefined, original: Transaction) {
+  if (!normalizedRuleValue(draft.ruleMatchValue)) return 'Enter a match value.'
+  if (!financialIntent(draft, original)) {
+    return 'Not eligible: change the financial outcome or confirm it before remembering.'
+  }
+  const needsSubcategory = draft.classification === 'EXPENSE' || draft.classification === 'REFUND'
+    || (draft.classification === 'TRANSFER' && draft.savings_effect !== 'NONE')
+  if (needsSubcategory && !subcategory) return 'Not eligible: this outcome requires a subcategory.'
+  if (draft.classification === 'TRANSFER' && draft.savings_effect !== 'NONE' && subcategory?.budget_bucket !== 'SAVINGS') {
+    return 'Not eligible: a Savings effect requires a Savings subcategory.'
+  }
+  if (draft.classification === 'TRANSFER' && draft.savings_effect === 'NONE' && subcategory) {
+    return 'Not eligible: an ordinary Transfer rule cannot assign a subcategory.'
+  }
+  if (subcategory && !acceptsSubcategory(draft.classification, subcategory)) {
+    return 'Not eligible: the subcategory does not fit this classification.'
+  }
+  return null
 }
 
 export default function TransactionTable({ mode, reload, initialReason = '', initialStartDate = '', initialEndDate = '' }: Props) {
@@ -265,39 +305,69 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
       notes: item.notes,
       rememberRule: false,
       ruleMatchValue: item.raw_description,
+      ruleMatchType: 'CONTAINS',
+      resolveConflict: false,
+      confirmOutcome: false,
     })
   }
 
   async function saveEdit(event: FormEvent) {
     event.preventDefault()
     if (editingId === null || !draft) return
+    const original = transactions.find((item) => item.id === editingId)
+    if (!original) return
     setError('')
+    const reviewing = mode === 'review' && original.review_status === 'PENDING'
+    const subcategory = draft.subcategory ? Number(draft.subcategory) : null
+    const changed: Record<string, unknown> = {}
+    if (draft.classification !== original.classification) changed.classification = draft.classification
+    if (draft.savings_effect !== original.savings_effect) changed.savings_effect = draft.savings_effect
+    if (subcategory !== original.subcategory) changed.subcategory = subcategory
+    if (draft.merchant !== original.merchant) changed.merchant = draft.merchant
+    if (draft.notes !== original.notes) changed.notes = draft.notes
+    const remember = reviewing && draft.rememberRule
+    const resolve = {
+      ...(reviewing && draft.resolveConflict ? { resolve_rule_conflict: true } : {}),
+      ...(reviewing && draft.confirmOutcome && draft.classification !== 'UNKNOWN' && !(subcategory === null && (draft.classification === 'EXPENSE' || draft.classification === 'REFUND' || (draft.classification === 'TRANSFER' && draft.savings_effect !== 'NONE'))) ? { confirm_financial_outcome: true } : {}),
+    }
+    const path = !reviewing
+      ? `/api/transactions/${editingId}/`
+      : `/api/transactions/${editingId}/${remember ? 'save-with-rule/' : 'review-save/'}`
     try {
-      const response = await apiFetch(`/api/transactions/${editingId}/${draft.rememberRule ? 'save-with-rule/' : ''}`, {
-        method: draft.rememberRule ? 'POST' : 'PATCH',
+      const response = await apiFetch(path, {
+        method: reviewing ? 'POST' : 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          classification: draft.classification,
-          savings_effect: draft.savings_effect,
-          subcategory: draft.subcategory || null,
-          merchant: draft.merchant,
-          notes: draft.notes,
-          ...(draft.rememberRule ? { match_value: draft.ruleMatchValue } : {}),
+        body: JSON.stringify(!reviewing ? changed : {
+          ...changed,
+          ...resolve,
+          ...(remember ? {
+            match_type: draft.ruleMatchType,
+            match_value: normalizedRuleValue(draft.ruleMatchValue),
+          } : {}),
         }),
       })
       const result = await response.json()
       if (!response.ok) throw new Error(errorText(result.detail ?? result) || `Save failed (${response.status})`)
-      if (draft.rememberRule) {
-        setNotice('Transaction updated and categorization rule created.')
-        if (result.matching_pending_count > 0 || result.conflicting_pending_count > 0) {
-          setPendingRulePrompt({
+      const saved = (remember ? result.transaction : result) as Transaction
+      if (reviewing) {
+        setTransactions((current) => saved.review_status === 'PENDING'
+          ? current.map((item) => item.id === saved.id ? saved : item)
+          : current.filter((item) => item.id !== saved.id))
+      }
+      const blockers = reviewing && saved.review_status === 'PENDING'
+        ? ` Still pending review: ${saved.review_reasons.map((reason) => reason.label).join(' · ') || 'see transaction'}.`
+        : ''
+      if (remember) {
+        setNotice(`Transaction updated and rule #${result.rule.id} created.${blockers}`)
+        setPendingRulePrompt(result.matching_pending_count > 0 || result.conflicting_pending_count > 0
+          ? {
             id: result.rule.id as number,
             matching: result.matching_pending_count as number,
             conflicting: result.conflicting_pending_count as number,
-          })
-        }
+          }
+          : null)
       } else {
-        setNotice('Transaction updated.')
+        setNotice(`Transaction updated.${blockers}`)
         setPendingRulePrompt(null)
       }
       refresh()
@@ -371,6 +441,7 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
     name: string,
     budget_bucket: Bucket | null,
     classification: Classification,
+    savings_effect: SavingsEffect,
   ) {
     const response = await apiFetch(`/api/transactions/${id}/create-subcategory-and-assign/`, {
       method: 'POST',
@@ -380,17 +451,21 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
         scope: classification === 'OTHER_INFLOW' ? 'OTHER_INFLOW' : 'BUDGET',
         budget_bucket,
         classification,
+        savings_effect,
       }),
     })
     const result = await response.json()
     if (!response.ok) throw new Error(errorText(result))
     const created = result.subcategory as Subcategory
     setSubcategories((current) => [...current, created])
+    setAllSubcategories((current) => [...current, created])
     setTransactions((current) => current.map((item) => item.id === id ? result.transaction as Transaction : item))
     setDraft((current) => current ? {
       ...current,
       classification: result.transaction.classification,
+      savings_effect: result.transaction.savings_effect,
       subcategory: String(created.id),
+      resolveConflict: result.transaction.categorization_rule_conflict ? current.resolveConflict : false,
     } : current)
     setNotice('Subcategory created and assigned.')
     return created
@@ -591,12 +666,18 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
                   editing={editingId === item.id}
                   draft={editingId === item.id ? draft : null}
                   subcategories={subcategories}
+                  allSubcategories={allSubcategories}
                   onSelect={() => setSelected((current) => current.includes(item.id)
                     ? current.filter((id) => id !== item.id)
                     : [...current, item.id])}
                   onEdit={() => beginEdit(item)}
                   onCancel={() => { setEditingId(null); setDraft(null) }}
-                  onDraft={(value) => setDraft(value)}
+                  onDraft={(value) => setDraft({
+                    ...value,
+                    rememberRule: value.rememberRule && canRememberOutcome(
+                      value, allSubcategories.find((category) => category.id === Number(value.subcategory)),
+                    ),
+                  })}
                   onSave={saveEdit}
                   onCreateSubcategory={createSubcategory}
                   reviewStatusLabel={reviewStatusLabels[item.review_status]}
@@ -666,6 +747,7 @@ type RowProps = {
   editing: boolean
   draft: Draft | null
   subcategories: Subcategory[]
+  allSubcategories: Subcategory[]
   onSelect: () => void
   onEdit: () => void
   onCancel: () => void
@@ -676,6 +758,7 @@ type RowProps = {
     name: string,
     bucket: Bucket | null,
     classification: Classification,
+    savings_effect: SavingsEffect,
   ) => Promise<Subcategory>
   reviewStatusLabel: string
   onMarkReviewed: () => void
@@ -683,7 +766,8 @@ type RowProps = {
 }
 
 function FragmentRow(props: RowProps) {
-  const { item, mode, columnCount, selected, editing, draft, subcategories, reviewStatusLabel } = props
+  const { item, mode, columnCount, selected, editing, draft, subcategories, allSubcategories, reviewStatusLabel } = props
+  const reviewing = mode === 'review' && item.review_status === 'PENDING'
   const [candidateId, setCandidateId] = useState<number | ''>(item.duplicate_candidates[0]?.id ?? '')
   const [createName, setCreateName] = useState('')
   const [createBucket, setCreateBucket] = useState<Bucket>('NEEDS')
@@ -692,7 +776,20 @@ function FragmentRow(props: RowProps) {
   const eligibleSubcategories = draft
     ? subcategories.filter((subcategory) => acceptsSubcategory(draft.classification, subcategory))
     : []
-  const assignableBuckets = draft ? eligibleBuckets(draft.classification) : []
+  const assignableBuckets = draft && !(draft.classification === 'TRANSFER' && draft.savings_effect === 'NONE')
+    ? eligibleBuckets(draft.classification) : []
+  const selectedSubcategory = draft
+    ? allSubcategories.find((category) => category.id === Number(draft.subcategory))
+    : undefined
+  const retainedSubcategory = draft && draft.classification === item.classification
+    && draft.subcategory === String(item.subcategory)
+    && selectedSubcategory && !eligibleSubcategories.some((category) => category.id === selectedSubcategory.id)
+    ? selectedSubcategory : undefined
+  const outcomeNeedsSubcategory = draft
+    ? (draft.classification === 'EXPENSE' || draft.classification === 'REFUND'
+      || (draft.classification === 'TRANSFER' && draft.savings_effect !== 'NONE')) && !selectedSubcategory
+    : false
+  const ruleProblem = draft ? ruleIneligibility(draft, selectedSubcategory, item) : null
 
   return (
     <>
@@ -717,7 +814,7 @@ function FragmentRow(props: RowProps) {
             <span>{item.subcategory_name}<small className="bucket-label">{item.budget_bucket && bucketLabels[item.budget_bucket]}</small></span>
           ) : <span className="muted">Uncategorized</span>}
           {item.categorized_by_rule && (
-            <small className="rule-provenance">Automatically categorized · Rule #{item.categorized_by_rule}</small>
+            <small className="rule-provenance">Automatically resolved · Rule #{item.categorized_by_rule}</small>
           )}
           {item.savings_effect !== 'NONE' && (
             <small className="review-reasons">Savings {item.savings_effect.toLowerCase()}</small>
@@ -740,7 +837,7 @@ function FragmentRow(props: RowProps) {
         <td className={`amount-cell ${item.amount.startsWith('-') ? 'amount-negative' : 'amount-positive'}`}>{formatAmount(item.amount)}</td>
         <td className="row-actions">
           <button type="button" onClick={props.onEdit}>Edit</button>
-          {mode === 'review' && (
+          {reviewing && (
             <button type="button" onClick={props.onMarkReviewed}>Mark reviewed</button>
           )}
         </td>
@@ -748,7 +845,13 @@ function FragmentRow(props: RowProps) {
       {editing && draft && (
         <tr className="detail-row">
           <td colSpan={columnCount}>
-            <form className="transaction-editor" onSubmit={props.onSave}>
+            <form className="transaction-editor" onSubmit={(event) => {
+              if (reviewing && draft.rememberRule && ruleProblem) {
+                event.preventDefault()
+                return
+              }
+              props.onSave(event)
+            }}>
               <label>
                 Classification
                 <select
@@ -759,11 +862,10 @@ function FragmentRow(props: RowProps) {
                     props.onDraft({
                       ...draft,
                       classification,
-                      savings_effect: classification === 'TRANSFER' ? draft.savings_effect : 'NONE',
+                      savings_effect: 'NONE',
                       subcategory: nextSubcategory && acceptsSubcategory(classification, nextSubcategory)
                         ? draft.subcategory
                         : '',
-                      rememberRule: false,
                     })
                   }}
                 >
@@ -772,20 +874,47 @@ function FragmentRow(props: RowProps) {
                   ))}
                 </select>
               </label>
-              <label>
+              {draft.classification === 'TRANSFER' && (
+                <label>
+                  Savings activity
+                  <select
+                    value={draft.savings_effect}
+                    onChange={(event) => props.onDraft({
+                      ...draft,
+                      savings_effect: event.target.value as SavingsEffect,
+                      subcategory: event.target.value === 'NONE' || retainedSubcategory ? '' : draft.subcategory,
+                    })}
+                  >
+                    <option value="NONE">Not savings</option>
+                    <option value="CONTRIBUTION">Contribution</option>
+                    <option value="WITHDRAWAL">Withdrawal</option>
+                  </select>
+                </label>
+              )}
+              {draft.classification === 'TRANSFER' && draft.savings_effect === 'NONE' && draft.subcategory && (
+                <div>
+                  <small>Existing Savings subcategory is retained until you remove it.</small>{' '}
+                  <button type="button" onClick={() => props.onDraft({ ...draft, subcategory: '' })}>
+                    Remove subcategory
+                  </button>
+                </div>
+              )}
+              {(draft.classification !== 'TRANSFER' || draft.savings_effect !== 'NONE') && <label>
                 Subcategory
                 <select
                   value={draft.subcategory}
+                  required={draft.classification === 'TRANSFER'}
                   onChange={(event) => props.onDraft({
                     ...draft,
                     subcategory: event.target.value,
-                    savings_effect: subcategories.find((category) => category.id === Number(event.target.value))?.budget_bucket === 'SAVINGS'
-                      ? draft.savings_effect
-                      : 'NONE',
-                    rememberRule: event.target.value ? draft.rememberRule : false,
                   })}
                 >
                   <option value="">No subcategory</option>
+                  {retainedSubcategory && (
+                    <option value={retainedSubcategory.id} disabled>
+                      {retainedSubcategory.name} · retained {retainedSubcategory.is_active ? 'historical' : 'archived'}
+                    </option>
+                  )}
                   {eligibleSubcategories.map((subcategory) => (
                     <option key={subcategory.id} value={subcategory.id}>
                       {subcategory.name} · {subcategory.budget_bucket
@@ -794,24 +923,8 @@ function FragmentRow(props: RowProps) {
                     </option>
                   ))}
                 </select>
-              </label>
-              {draft.classification === 'TRANSFER' && (
-                <label>
-                  Savings effect
-                  <select
-                    value={draft.savings_effect}
-                    onChange={(event) => props.onDraft({
-                      ...draft,
-                      savings_effect: event.target.value as SavingsEffect,
-                    })}
-                  >
-                    <option value="NONE">None</option>
-                    <option value="CONTRIBUTION">Contribution</option>
-                    <option value="WITHDRAWAL">Withdrawal</option>
-                  </select>
-                </label>
-              )}
-              {mode === 'review' && (assignableBuckets.length > 0 || draft.classification === 'OTHER_INFLOW') && (
+              </label>}
+              {reviewing && (assignableBuckets.length > 0 || draft.classification === 'OTHER_INFLOW') && (
                 <details className="inline-category-create">
                   <summary>+ Create new subcategory</summary>
                   <div className="inline-category-fields">
@@ -855,6 +968,7 @@ function FragmentRow(props: RowProps) {
                             createName,
                             validBucket,
                             draft.classification,
+                            draft.savings_effect,
                           )
                           setCreateName('')
                           setCreateError('')
@@ -871,42 +985,82 @@ function FragmentRow(props: RowProps) {
                   </div>
                 </details>
               )}
-              {mode === 'review'
-                && draft.classification === 'EXPENSE'
-                && Boolean(draft.subcategory)
-                && (
-                  <div className="remember-rule">
-                    <label className="remember-rule-toggle">
-                      <input
-                        type="checkbox"
-                        checked={draft.rememberRule}
-                        onChange={(event) => props.onDraft({
-                          ...draft,
-                          rememberRule: event.target.checked,
-                          ruleMatchValue: draft.ruleMatchValue || item.raw_description,
-                        })}
-                      />
-                      Remember this for future matching expenses
-                    </label>
-                    {draft.rememberRule && (
-                      <>
-                        <label>
-                          Description fragment (whitespace collapsed when saved)
-                          <input
-                            value={draft.ruleMatchValue}
-                            maxLength={200}
-                            required
-                            onChange={(event) => props.onDraft({ ...draft, ruleMatchValue: event.target.value })}
-                          />
-                        </label>
-                        <p>
-                          When an EXPENSE description contains “{normalizedRuleValue(draft.ruleMatchValue) || '…'}”,
-                          assign {subcategories.find((category) => category.id === Number(draft.subcategory))?.name}.
-                        </p>
-                      </>
-                    )}
-                  </div>
-                )}
+              {reviewing && item.categorization_rule_conflict && (
+                <label className="remember-rule-toggle">
+                  <input
+                    type="checkbox"
+                    checked={draft.resolveConflict}
+                    onChange={(event) => props.onDraft({ ...draft, resolveConflict: event.target.checked })}
+                  />
+                  Resolve this rule conflict with the outcome above
+                </label>
+              )}
+              {reviewing && draft.classification !== 'UNKNOWN' && !outcomeNeedsSubcategory && (
+                <label className="remember-rule-toggle">
+                  <input
+                    type="checkbox"
+                    checked={draft.confirmOutcome}
+                    onChange={(event) => props.onDraft({ ...draft, confirmOutcome: event.target.checked })}
+                  />
+                  Confirm this financial outcome
+                </label>
+              )}
+              {reviewing && canRememberOutcome(draft, selectedSubcategory) && (
+                <div className="remember-rule">
+                  <label className="remember-rule-toggle">
+                    <input
+                      type="checkbox"
+                      checked={draft.rememberRule}
+                      onChange={(event) => props.onDraft({
+                        ...draft,
+                        rememberRule: event.target.checked,
+                        ruleMatchValue: draft.ruleMatchValue || item.raw_description,
+                      })}
+                    />
+                    Remember this outcome for future matching transactions
+                  </label>
+                  {draft.rememberRule && (
+                    <>
+                      <label>
+                        Raw description
+                        <select
+                          value={draft.ruleMatchType}
+                          onChange={(event) => props.onDraft({
+                            ...draft,
+                            ruleMatchType: event.target.value as Draft['ruleMatchType'],
+                          })}
+                        >
+                          <option value="CONTAINS">contains</option>
+                          <option value="STARTS_WITH">starts with</option>
+                        </select>
+                      </label>
+                      <label>
+                        Match value (whitespace collapsed when saved)
+                        <input
+                          value={draft.ruleMatchValue}
+                          maxLength={200}
+                          required
+                          onChange={(event) => props.onDraft({ ...draft, ruleMatchValue: event.target.value })}
+                        />
+                      </label>
+                      <p>
+                        When {draft.classification === 'EXPENSE'
+                          ? 'an Unknown transaction or an uncategorized Expense'
+                          : draft.classification === 'TRANSFER' && draft.savings_effect !== 'NONE'
+                            ? 'an Unknown transaction or unresolved Transfer'
+                            : 'an Unknown transaction'} description {draft.ruleMatchType === 'STARTS_WITH' ? 'starts with' : 'contains'}
+                        {' '}“{normalizedRuleValue(draft.ruleMatchValue) || '…'}”, set{' '}
+                        {classificationLabels[draft.classification]}
+                        {draft.savings_effect !== 'NONE' ? ` · Savings ${draft.savings_effect.toLowerCase()}` : ''}
+                        {selectedSubcategory ? ` · ${selectedSubcategory.name}` : ''}.
+                      </p>
+                      <p className={ruleProblem ? 'inline-create-error' : ''}>
+                        {ruleProblem ?? 'Eligible: this outcome can be saved as a rule.'}
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
               <label>
                 Clean merchant
                 <input value={draft.merchant} maxLength={200} onChange={(event) => props.onDraft({ ...draft, merchant: event.target.value })} />

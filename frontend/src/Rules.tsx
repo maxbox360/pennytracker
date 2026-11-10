@@ -3,57 +3,98 @@ import type { FormEvent } from 'react'
 import { apiFetch } from './api'
 
 type Bucket = 'NEEDS' | 'WANTS' | 'SAVINGS'
-type Subcategory = { id: number; name: string; budget_bucket: Bucket; is_active: boolean }
+type Classification = 'INCOME' | 'EXPENSE' | 'REFUND' | 'OTHER_INFLOW' | 'TRANSFER' | 'EXCLUDED'
+type Subcategory = {
+  id: number
+  name: string
+  scope: 'BUDGET' | 'OTHER_INFLOW'
+  budget_bucket: Bucket | null
+  is_active: boolean
+}
 type Rule = {
   id: number
   name: string
   match_field: 'RAW_DESCRIPTION'
   match_type: MatchType
   match_value: string
-  rule_kind: RuleKind
-  classification: 'EXPENSE' | 'TRANSFER'
+  classification: Classification
   savings_effect: SavingsEffect
-  subcategory: number
-  subcategory_name: string
-  subcategory_bucket: Bucket
-  subcategory_is_active: boolean
+  allow_unknown: boolean
+  subcategory: number | null
+  subcategory_name: string | null
+  subcategory_bucket: Bucket | null
+  subcategory_is_active: boolean | null
   is_active: boolean
 }
-type RuleKind = 'EXPENSE_CATEGORY' | 'SAVINGS_TRANSFER'
 type MatchType = 'CONTAINS' | 'STARTS_WITH'
 type SavingsEffect = 'NONE' | 'CONTRIBUTION' | 'WITHDRAWAL'
 type Draft = {
   name: string
-  rule_kind: RuleKind
+  classification: Classification
   match_type: MatchType
   match_value: string
-  savings_effect: 'CONTRIBUTION' | 'WITHDRAWAL'
+  savings_effect: SavingsEffect
   subcategory: string
+  allow_unknown: boolean
 }
 const emptyDraft: Draft = {
   name: '',
-  rule_kind: 'EXPENSE_CATEGORY',
+  classification: 'EXPENSE',
   match_type: 'CONTAINS',
   match_value: '',
-  savings_effect: 'CONTRIBUTION',
+  savings_effect: 'NONE',
   subcategory: '',
+  allow_unknown: true,
 }
-const targetBuckets: Record<RuleKind, Bucket[]> = {
-  EXPENSE_CATEGORY: ['NEEDS', 'WANTS'],
-  SAVINGS_TRANSFER: ['SAVINGS'],
+const classificationLabels: Record<Classification, string> = {
+  INCOME: 'Income',
+  EXPENSE: 'Expense',
+  REFUND: 'Refund',
+  OTHER_INFLOW: 'Other inflow',
+  TRANSFER: 'Transfer',
+  EXCLUDED: 'Excluded',
 }
 const matchLabels: Record<MatchType, string> = { CONTAINS: 'contains', STARTS_WITH: 'starts with' }
-const effectLabels = { CONTRIBUTION: 'Contribution', WITHDRAWAL: 'Withdrawal' } as const
+const effectLabels = { NONE: 'None', CONTRIBUTION: 'Contribution', WITHDRAWAL: 'Withdrawal' } as const
 
-function ruleSentence(rule: Pick<Rule, 'rule_kind' | 'match_type' | 'match_value' | 'savings_effect'>, target: string) {
-  const condition = `When a raw description ${matchLabels[rule.match_type]} “${rule.match_value}”`
-  return rule.rule_kind === 'SAVINGS_TRANSFER'
-    ? `${condition}, classify it as a Transfer, mark it as a Savings ${effectLabels[rule.savings_effect as 'CONTRIBUTION'].toLowerCase()}, and assign ${target}.`
-    : `${condition} on an Expense, assign ${target}. Classification is not changed.`
+function subcategoryFits(classification: Classification, category: Pick<Subcategory, 'scope' | 'budget_bucket'>) {
+  if (classification === 'OTHER_INFLOW') return category.scope === 'OTHER_INFLOW'
+  if (category.scope !== 'BUDGET') return false
+  if (classification === 'EXPENSE' || classification === 'REFUND') {
+    return category.budget_bucket === 'NEEDS' || category.budget_bucket === 'WANTS'
+  }
+  return classification === 'TRANSFER' && category.budget_bucket === 'SAVINGS'
+}
+
+function subcategoryRequired(draft: Pick<Draft, 'classification' | 'savings_effect'>) {
+  return draft.classification === 'EXPENSE' || draft.classification === 'REFUND'
+    || (draft.classification === 'TRANSFER' && draft.savings_effect !== 'NONE')
+}
+
+function ruleSentence(
+  rule: Pick<Rule, 'classification' | 'match_type' | 'match_value' | 'savings_effect' | 'allow_unknown'>,
+  target: string | null,
+) {
+  const outcome = [
+    `classify it as ${classificationLabels[rule.classification]}`,
+    rule.savings_effect !== 'NONE' ? `mark a Savings ${effectLabels[rule.savings_effect].toLowerCase()}` : '',
+    target ? `assign ${target}` : '',
+  ].filter(Boolean).join(', ')
+  const scope = rule.classification === 'EXPENSE'
+    ? (rule.allow_unknown ? ' (applies to Unknown transactions and existing Expenses)' : ' (applies to transactions already classified as Expense)')
+    : rule.classification === 'TRANSFER' && rule.savings_effect !== 'NONE'
+      ? ' (applies to Unknown transactions and unresolved Transfers)'
+      : ' (applies to Unknown transactions)'
+  return `When a raw description ${matchLabels[rule.match_type]} “${rule.match_value}”, ${outcome}${scope}.`
 }
 
 function ruleUsable(rule: Rule) {
-  return rule.subcategory_is_active && targetBuckets[rule.rule_kind].includes(rule.subcategory_bucket)
+  if (rule.subcategory === null) return !subcategoryRequired(rule)
+  return Boolean(rule.subcategory_is_active)
+    && subcategoryFits(rule.classification, {
+      scope: rule.subcategory_bucket ? 'BUDGET' : 'OTHER_INFLOW',
+      budget_bucket: rule.subcategory_bucket,
+    })
 }
 
 function errorText(value: unknown): string {
@@ -115,11 +156,12 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
     setDraft(rule
       ? {
         name: rule.name,
-        rule_kind: rule.rule_kind,
+        classification: rule.classification,
         match_type: rule.match_type,
         match_value: rule.match_value,
-        savings_effect: rule.savings_effect === 'WITHDRAWAL' ? 'WITHDRAWAL' : 'CONTRIBUTION',
-        subcategory: String(rule.subcategory),
+        savings_effect: rule.savings_effect,
+        subcategory: rule.subcategory === null ? '' : String(rule.subcategory),
+        allow_unknown: rule.allow_unknown,
       }
       : emptyDraft)
   }
@@ -141,9 +183,10 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
             match_field: 'RAW_DESCRIPTION',
             match_type: draft.match_type,
             match_value: draft.match_value,
-            rule_kind: draft.rule_kind,
-            savings_effect: draft.rule_kind === 'SAVINGS_TRANSFER' ? draft.savings_effect : 'NONE',
-            subcategory: draft.subcategory,
+            classification: draft.classification,
+            savings_effect: draft.classification === 'TRANSFER' ? draft.savings_effect : 'NONE',
+            subcategory: draft.subcategory ? Number(draft.subcategory) : null,
+            allow_unknown: draft.classification === 'EXPENSE' ? draft.allow_unknown : false,
             ...(editingId === null ? { is_active: true } : {}),
           }),
         },
@@ -238,16 +281,18 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
     }
   }
 
-  const allowedBuckets = targetBuckets[draft.rule_kind]
   const assignable = categories.filter((category) => (
-    category.is_active && allowedBuckets.includes(category.budget_bucket)
+    category.is_active && subcategoryFits(draft.classification, category)
   ))
   const currentUnavailable = categories.find((category) => (
     category.id === Number(draft.subcategory)
-    && (!category.is_active || !allowedBuckets.includes(category.budget_bucket))
+    && (!category.is_active || !subcategoryFits(draft.classification, category))
   ))
-  const targetName = categories.find((category) => category.id === Number(draft.subcategory))?.name
-    || 'the selected subcategory'
+  const targetName = draft.subcategory
+    ? categories.find((category) => category.id === Number(draft.subcategory))?.name ?? null
+    : null
+  const canSubcategorize = draft.classification !== 'INCOME' && draft.classification !== 'EXCLUDED'
+    && (draft.classification !== 'TRANSFER' || draft.savings_effect !== 'NONE')
 
   return (
     <section className="rules-panel" aria-labelledby="rules-heading">
@@ -255,8 +300,8 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
         <div>
           <h2 id="rules-heading">Rules</h2>
           <p>
-            Expense categorization rules assign a Needs/Wants subcategory to transactions that are already Expenses and never change classification.
-            Savings transfer rules explicitly classify a matching unresolved transaction as a Transfer with a Savings effect.
+            Rules set a classification, optional Savings effect, and subcategory for matching raw descriptions.
+            Rules apply only to eligible unresolved transactions; Expense rules can categorize uncategorized Expenses.
             Matching is case-insensitive and deterministic.
           </p>
         </div>
@@ -291,13 +336,19 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
             <input value={draft.name} maxLength={100} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
           </label>
           <label>
-            Rule type
+            Classification
             <select
-              value={draft.rule_kind}
-              onChange={(event) => setDraft({ ...draft, rule_kind: event.target.value as RuleKind, subcategory: '' })}
+              value={draft.classification}
+              onChange={(event) => setDraft({
+                ...draft,
+                classification: event.target.value as Classification,
+                savings_effect: 'NONE',
+                subcategory: '',
+              })}
             >
-              <option value="EXPENSE_CATEGORY">Expense categorization</option>
-              <option value="SAVINGS_TRANSFER">Savings transfer (sets classification)</option>
+              {(Object.keys(classificationLabels) as Classification[]).map((value) => (
+                <option key={value} value={value}>{classificationLabels[value]}</option>
+              ))}
             </select>
           </label>
           <label>
@@ -316,50 +367,60 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
               value={draft.match_value}
               maxLength={200}
               required
-              placeholder={draft.rule_kind === 'SAVINGS_TRANSFER' ? 'AUTO SAVE *' : 'COFFEE SHOP'}
+              placeholder="COFFEE SHOP"
               onChange={(event) => setDraft({ ...draft, match_value: event.target.value })}
             />
           </label>
-          {draft.rule_kind === 'SAVINGS_TRANSFER' && (
+          {draft.classification === 'TRANSFER' && (
             <label>
               Savings effect
               <select
                 value={draft.savings_effect}
-                onChange={(event) => setDraft({ ...draft, savings_effect: event.target.value as 'CONTRIBUTION' | 'WITHDRAWAL' })}
+                onChange={(event) => setDraft({
+                  ...draft,
+                  savings_effect: event.target.value as SavingsEffect,
+                  subcategory: event.target.value === 'NONE' ? '' : draft.subcategory,
+                })}
               >
+                <option value="NONE">None</option>
                 <option value="CONTRIBUTION">Contribution</option>
                 <option value="WITHDRAWAL">Withdrawal</option>
               </select>
             </label>
           )}
-          <label>
-            {draft.rule_kind === 'SAVINGS_TRANSFER' ? 'Target Savings subcategory' : 'Target subcategory'}
+          {draft.classification === 'EXPENSE' && (
+            <label className="remember-rule-toggle">
+              <input
+                type="checkbox"
+                checked={draft.allow_unknown}
+                onChange={(event) => setDraft({ ...draft, allow_unknown: event.target.checked })}
+              />
+              Apply to Unknown transactions (otherwise only existing Expenses)
+            </label>
+          )}
+          {canSubcategorize && <label>
+            Subcategory{subcategoryRequired(draft) ? '' : ' (optional)'}
             <select
               value={draft.subcategory}
-              required
+              required={subcategoryRequired(draft)}
               onChange={(event) => setDraft({ ...draft, subcategory: event.target.value })}
             >
-              <option value="">Choose…</option>
+              <option value="">{subcategoryRequired(draft) ? 'Choose…' : 'None'}</option>
               {currentUnavailable && (
                 <option value={currentUnavailable.id}>
-                  {currentUnavailable.name} · {bucketLabels[currentUnavailable.budget_bucket]}
-                  {currentUnavailable.is_active ? ' (not valid for this rule type)' : ' (archived)'}
+                  {currentUnavailable.name} · {currentUnavailable.budget_bucket ? bucketLabels[currentUnavailable.budget_bucket] : 'Other Inflows'}
+                  {currentUnavailable.is_active ? ' (not valid for this outcome)' : ' (archived)'}
                 </option>
               )}
               {assignable.map((category) => (
                 <option key={category.id} value={category.id}>
-                  {category.name} · {bucketLabels[category.budget_bucket]}
+                  {category.name} · {category.budget_bucket ? bucketLabels[category.budget_bucket] : 'Other Inflows'}
                 </option>
               ))}
             </select>
-          </label>
+          </label>}
           <p className="rule-preview">
             {ruleSentence({ ...draft, match_value: normalizedRuleValue(draft.match_value) || '…' }, targetName)}
-          </p>
-          <p className="rule-example">
-            {draft.rule_kind === 'SAVINGS_TRANSFER'
-              ? 'Applies only to Unknown transactions and unresolved Transfers with no Savings effect. It never overwrites a resolved transaction.'
-              : 'Applies only to transactions already classified as Expense.'}
           </p>
           <div className="editor-actions">
             <button className="primary-button" type="submit">Save rule</button>
@@ -378,7 +439,7 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
       )}
 
       {rules.length === 0 ? (
-        <p className="message">No categorization rules yet.</p>
+        <p className="message">No transaction rules yet.</p>
       ) : (
         <div className="rule-list">
           {rules.map((rule) => (
@@ -386,17 +447,17 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
               <div className="rule-condition">
                 <strong>
                   Rule #{rule.id} · {rule.name || `Description ${matchLabels[rule.match_type]} “${rule.match_value}”`}
-                  {' '}<small>{rule.rule_kind === 'SAVINGS_TRANSFER' ? 'Savings transfer' : 'Expense categorization'}</small>
+                  {' '}<small>{classificationLabels[rule.classification]}{rule.savings_effect !== 'NONE' ? ` · Savings ${rule.savings_effect.toLowerCase()}` : ''}</small>
                 </strong>
                 <span>{ruleSentence(rule, rule.subcategory_name)}</span>
               </div>
               <div className="rule-target">
-                <span>{rule.subcategory_name} · {bucketLabels[rule.subcategory_bucket]}</span>
+                <span>{rule.subcategory_name ? `${rule.subcategory_name} · ${rule.subcategory_bucket ? bucketLabels[rule.subcategory_bucket] : 'Other Inflows'}` : 'No subcategory'}</span>
                 {!ruleUsable(rule) && (
                   <small className="rule-warning">
-                    {!rule.subcategory_is_active
+                    {rule.subcategory !== null && !rule.subcategory_is_active
                       ? 'Target subcategory is archived; this rule is not applied.'
-                      : `Target bucket is not valid for this rule type (${rule.rule_kind === 'SAVINGS_TRANSFER' ? 'Savings' : 'Needs or Wants'} required); this rule is not applied.`}
+                      : 'Target subcategory is not valid for this outcome; this rule is not applied.'}
                   </small>
                 )}
               </div>

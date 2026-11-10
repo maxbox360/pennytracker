@@ -7,7 +7,7 @@ import Reports from './Reports'
 import './App.css'
 
 type Account = { id: number; name: string; is_active: boolean }
-type Classification = 'UNKNOWN' | 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER' | 'EXCLUDED'
+type Classification = 'UNKNOWN' | 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER' | 'EXCLUDED' | 'OTHER_INFLOW'
 type Preview = {
   account: { id: number; name: string }
   filename: string
@@ -29,17 +29,17 @@ type Preview = {
     overlap_status: 'NEW' | 'ALREADY_REPRESENTED' | 'POSSIBLE_DUPLICATE'
     overlap_reason: string
     categorization: {
-      status: 'AUTO_CATEGORIZED' | 'AUTO_SAVINGS_TRANSFER' | 'RULE_CONFLICT' | 'NOT_CATEGORIZED'
+      status: 'AUTO_RESOLVED' | 'RULE_CONFLICT' | 'NOT_CATEGORIZED'
       classification: Classification | null
       savings_effect: 'NONE' | 'CONTRIBUTION' | 'WITHDRAWAL'
-      subcategory: { id: number; name: string; budget_bucket: 'NEEDS' | 'WANTS' | 'SAVINGS' } | null
+      subcategory: { id: number; name: string; budget_bucket: 'NEEDS' | 'WANTS' | 'SAVINGS' | null } | null
       rules: {
         id: number
-        rule_kind: 'EXPENSE_CATEGORY' | 'SAVINGS_TRANSFER'
+        classification: Classification
         match_type: 'CONTAINS' | 'STARTS_WITH'
         match_value: string
         savings_effect: 'NONE' | 'CONTRIBUTION' | 'WITHDRAWAL'
-        subcategory_name: string
+        subcategory_name: string | null
       }[]
     }
     duplicate_candidates: {
@@ -73,6 +73,7 @@ const classificationLabels: Record<Classification, string> = {
   REFUND: 'Refund',
   TRANSFER: 'Transfer',
   EXCLUDED: 'Excluded',
+  OTHER_INFLOW: 'Other inflow',
 }
 
 function formatAmount(amount: string) {
@@ -91,6 +92,27 @@ function apiErrorMessage(result: unknown, status: number): string {
     return field === 'non_field_errors' ? messages[0] : `${field[0].toUpperCase()}${field.slice(1).replace(/_/g, ' ')}: ${messages[0]}`
   }
   return `The import request failed (${status}). Please try again.`
+}
+
+type PreviewOutcome = {
+  classification: Classification | null
+  savings_effect: 'NONE' | 'CONTRIBUTION' | 'WITHDRAWAL'
+  subcategory?: { name: string; budget_bucket: 'NEEDS' | 'WANTS' | 'SAVINGS' | null } | null
+  subcategory_name?: string | null
+}
+
+function ruleText(rule: { id: number; match_type: string; match_value: string }) {
+  return `#${rule.id} ${rule.match_type === 'STARTS_WITH' ? 'starts with' : 'contains'} “${rule.match_value}”`
+}
+
+function outcomeText(outcome: PreviewOutcome) {
+  const name = outcome.subcategory?.name ?? outcome.subcategory_name
+  const bucket = outcome.subcategory?.budget_bucket
+  return [
+    outcome.classification ? classificationLabels[outcome.classification] : 'Unspecified',
+    outcome.savings_effect !== 'NONE' ? `Savings ${outcome.savings_effect.toLowerCase()}` : '',
+    name ? `${name}${bucket ? ` (${bucket.charAt(0)}${bucket.slice(1).toLowerCase()})` : ''}` : '',
+  ].filter(Boolean).join(' · ')
 }
 
 function App() {
@@ -262,7 +284,7 @@ function App() {
                 : view === 'categories'
                   ? 'Manage the subcategories used to organize transactions.'
                   : view === 'rules'
-                    ? 'Manage the deterministic rules used to categorize future expenses.'
+                    ? 'Manage the deterministic rules used to classify and categorize transactions.'
                     : view === 'reports'
                       ? 'Explore All Time, yearly, and monthly accounting with trends and auditable transaction details.'
                     : 'A clear view of activity across your accounts.'}
@@ -417,28 +439,17 @@ function App() {
                                   ).join(' | ')}
                                 </small>
                               )}
-                              {row.categorization.status === 'AUTO_CATEGORIZED' && row.categorization.subcategory && (
+                              {row.categorization.status === 'AUTO_RESOLVED' && row.categorization.classification && (
                                 <small className="categorization-preview">
-                                  Auto-categorized: {row.categorization.subcategory.name} ·
-                                  {' '}{row.categorization.subcategory.budget_bucket === 'NEEDS' ? 'Needs' : 'Wants'}
-                                  {' '}({row.categorization.rules.length} matching rule{row.categorization.rules.length === 1 ? '' : 's'})
-                                </small>
-                              )}
-                              {row.categorization.status === 'AUTO_SAVINGS_TRANSFER' && row.categorization.subcategory && (
-                                <small className="categorization-preview">
-                                  Auto Savings transfer: Transfer · {row.categorization.savings_effect === 'CONTRIBUTION' ? 'Contribution' : 'Withdrawal'}
-                                  {' '}· {row.categorization.subcategory.name}
-                                  {' '}({row.categorization.rules.length} matching rule{row.categorization.rules.length === 1 ? '' : 's'})
+                                  Auto-resolved: {outcomeText(row.categorization)}
+                                  {' '}({row.categorization.rules.length} matching rule{row.categorization.rules.length === 1 ? '' : 's'}:
+                                  {' '}{row.categorization.rules.map(ruleText).join('; ')})
                                 </small>
                               )}
                               {row.categorization.status === 'RULE_CONFLICT' && (
                                 <small className="categorization-conflict">
-                                  Rule conflict — requires Review:
-                                  {' '}{[...new Set(row.categorization.rules.map((rule) => (
-                                    rule.rule_kind === 'SAVINGS_TRANSFER'
-                                      ? `${rule.savings_effect === 'CONTRIBUTION' ? 'Contribution' : 'Withdrawal'} → ${rule.subcategory_name}`
-                                      : rule.subcategory_name
-                                  )))].join(', ')}
+                                  Rule conflict — requires Review. Conflicting rules:
+                                  {' '}{row.categorization.rules.map((rule) => `${ruleText(rule)} → ${outcomeText(rule)}`).join(' | ')}
                                 </small>
                               )}
                             </td>
