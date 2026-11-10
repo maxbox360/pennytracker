@@ -219,6 +219,7 @@ class TransactionModelTests(TestCase):
             raw_description='Savings transfer',
             amount=Decimal('-100.00'),
             classification=Transaction.Classification.TRANSFER,
+            savings_effect=SavingsEffect.CONTRIBUTION,
         )
         self.assertEqual(transaction.budget_bucket, BudgetBucket.SAVINGS)
         self.assertEqual(transaction.review_status, ReviewStatus.PENDING)
@@ -800,7 +801,7 @@ class LedgerApiTests(APITestCase):
         )
         response = self.client.patch(
             f'/api/transactions/{transaction.id}/',
-            {'subcategory': savings.id},
+            {'subcategory': savings.id, 'savings_effect': 'CONTRIBUTION'},
             format='json',
         )
         self.assertEqual(response.status_code, 200)
@@ -1323,7 +1324,7 @@ class CsvImportApiTests(APITestCase):
         self.assertEqual(preview.status_code, 200)
         expense, roundup = preview.data['valid_rows']
         self.assertEqual(expense['classification'], 'EXPENSE')
-        self.assertEqual(expense['categorization']['status'], 'AUTO_CATEGORIZED')
+        self.assertEqual(expense['categorization']['status'], 'AUTO_RESOLVED')
         self.assertEqual(expense['categorization']['subcategory']['name'], 'Fast Food')
         self.assertEqual(roundup['classification'], 'UNKNOWN')
         self.assertEqual(roundup['categorization']['status'], 'NOT_CATEGORIZED')
@@ -1941,6 +1942,7 @@ class CategorizationRuleApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(CategorizationRule.objects.count(), 0)
 
+        record = self.create_transaction('COFFEE SHOP teaching')
         other = self.create_transaction('COFFEE SHOP second')
         response = self.client.post(
             f'/api/transactions/{record.id}/save-with-rule/',
@@ -2243,7 +2245,6 @@ class MonthlyAccountingTests(APITestCase):
         ordinary = self.create_transaction(
             classification='TRANSFER',
             amount='-900.00',
-            subcategory=self.savings,
         )
         ordinary.mark_reviewed()
 
@@ -2852,7 +2853,6 @@ class SavingsTransferRuleTests(APITestCase):
     def savings_rule(self, value='AUTO SAVE', effect=SavingsEffect.CONTRIBUTION, target=None,
                      match_type=RuleMatchType.STARTS_WITH, **kwargs):
         return CategorizationRule.objects.create(
-            rule_kind='SAVINGS_TRANSFER',
             classification='TRANSFER',
             savings_effect=effect,
             match_type=match_type,
@@ -2869,7 +2869,7 @@ class SavingsTransferRuleTests(APITestCase):
 
     def payload(self, **overrides):
         return {
-            'rule_kind': 'SAVINGS_TRANSFER', 'match_type': 'STARTS_WITH', 'match_value': 'AUTO SAVE *',
+            'classification': 'TRANSFER', 'match_type': 'STARTS_WITH', 'match_value': 'AUTO SAVE *',
             'savings_effect': 'CONTRIBUTION', 'subcategory': self.fund.id, **overrides,
         }
 
@@ -2893,11 +2893,11 @@ class SavingsTransferRuleTests(APITestCase):
 
     def test_existing_rules_default_to_expense_category_and_never_change_classification(self):
         rule = CategorizationRule.objects.create(match_value='COFFEE', subcategory=self.wants)
-        self.assertEqual(rule.rule_kind, 'EXPENSE_CATEGORY')
+        self.assertFalse(rule.allow_unknown)
         self.assertEqual(rule.savings_effect, SavingsEffect.NONE)
         self.assertFalse(rule_matches(rule, 'UNKNOWN', 'COFFEE'))
         self.assertTrue(rule_matches(rule, 'EXPENSE', 'COFFEE'))
-        self.assertEqual(evaluate_rules('EXPENSE', 'COFFEE', [rule])['classification'], None)
+        self.assertEqual(evaluate_rules('EXPENSE', 'COFFEE', [rule])['classification'], 'EXPENSE')
 
     def test_expense_contains_rule_can_use_starts_with_but_still_requires_expense(self):
         rule = CategorizationRule.objects.create(
@@ -2930,7 +2930,7 @@ class SavingsTransferRuleTests(APITestCase):
         expense = evaluate_rules('EXPENSE', 'AUTO SAVE * 1', [expense_rule, savings_rule])
         self.assertFalse(expense['conflict'])
         self.assertEqual(expense['subcategory'], self.wants)
-        self.assertIsNone(expense['classification'])
+        self.assertEqual(expense['classification'], 'EXPENSE')
         unknown = evaluate_rules('UNKNOWN', 'AUTO SAVE * 1', [expense_rule, savings_rule])
         self.assertEqual(unknown['classification'], 'TRANSFER')
         self.assertEqual(unknown['subcategory'], self.fund)
@@ -2998,7 +2998,7 @@ class SavingsTransferRuleTests(APITestCase):
         preview = self.preview(content)
         self.assertEqual(preview.status_code, 200)
         first, second, third = preview.data['valid_rows']
-        self.assertEqual(first['categorization']['status'], 'AUTO_SAVINGS_TRANSFER')
+        self.assertEqual(first['categorization']['status'], 'AUTO_RESOLVED')
         self.assertEqual(first['categorization']['classification'], 'TRANSFER')
         self.assertEqual(first['categorization']['savings_effect'], 'CONTRIBUTION')
         self.assertEqual(second['categorization']['savings_effect'], 'WITHDRAWAL')
@@ -3044,7 +3044,7 @@ class SavingsTransferRuleTests(APITestCase):
         self.txn(description='AUTO SAVE * 1', classification='EXPENSE', amount='-1.00')
         dup = self.preview(content)
         self.assertEqual(dup.data['valid_rows'][0]['overlap_status'], 'POSSIBLE_DUPLICATE')
-        self.assertEqual(dup.data['valid_rows'][0]['categorization']['status'], 'AUTO_SAVINGS_TRANSFER')
+        self.assertEqual(dup.data['valid_rows'][0]['categorization']['status'], 'AUTO_RESOLVED')
         self.assertEqual(dup.data['review_required_row_count'], 1)
 
     # --- apply to pending ---
@@ -3172,9 +3172,48 @@ class RuleKindMigrationTests(TransactionTestCase):
             executor.migrate(executor.loader.graph.leaf_nodes())
             rule = CategorizationRule.objects.get(pk=rule_id)
             self.assertEqual(
-                (rule.rule_kind, rule.classification, rule.savings_effect, rule.match_type),
-                ('EXPENSE_CATEGORY', 'EXPENSE', SavingsEffect.NONE, 'CONTAINS'),
+                (rule.allow_unknown, rule.classification, rule.savings_effect, rule.match_type),
+                (False, 'EXPENSE', SavingsEffect.NONE, 'CONTAINS'),
             )
+        finally:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
+
+    def test_existing_outcomes_and_provenance_survive_generalization(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate([('finance', '0010_savings_transfer_rules')])
+        apps = executor.loader.project_state([('finance', '0010_savings_transfer_rules')]).apps
+        account = apps.get_model('finance', 'Account').objects.create(name='Synthetic account')
+        category = apps.get_model('finance', 'Subcategory')
+        wants = category.objects.create(name='Synthetic dining', budget_bucket='WANTS')
+        savings = category.objects.create(name='Synthetic savings', budget_bucket='SAVINGS')
+        old_rule = apps.get_model('finance', 'CategorizationRule')
+        expense = old_rule.objects.create(match_value='EXAMPLE CAFE', subcategory_id=wants.pk)
+        transfer = old_rule.objects.create(
+            rule_kind='SAVINGS_TRANSFER', classification='TRANSFER',
+            savings_effect='CONTRIBUTION', match_type='STARTS_WITH',
+            match_value='AUTO SAVE *', subcategory_id=savings.pk,
+        )
+        record = apps.get_model('finance', 'Transaction').objects.create(
+            account_id=account.pk, date=date(2026, 3, 5), raw_description='EXAMPLE CAFE',
+            amount=Decimal('-5.00'), classification='EXPENSE', subcategory_id=wants.pk,
+            budget_bucket='WANTS', categorized_by_rule_id=expense.pk, review_status='NOT_REQUIRED',
+        )
+        try:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
+            expense_rule = CategorizationRule.objects.get(pk=expense.pk)
+            savings_rule = CategorizationRule.objects.get(pk=transfer.pk)
+            migrated = Transaction.objects.get(pk=record.pk)
+            self.assertFalse(expense_rule.allow_unknown)
+            self.assertFalse(rule_matches(expense_rule, 'UNKNOWN', 'EXAMPLE CAFE'))
+            self.assertTrue(rule_matches(expense_rule, 'EXPENSE', 'EXAMPLE CAFE'))
+            self.assertTrue(rule_matches(savings_rule, 'UNKNOWN', 'AUTO SAVE * 1'))
+            self.assertEqual((savings_rule.classification, savings_rule.savings_effect, savings_rule.subcategory_id),
+                             ('TRANSFER', 'CONTRIBUTION', savings.pk))
+            self.assertEqual((migrated.classification, migrated.subcategory_id, migrated.budget_bucket,
+                              migrated.categorized_by_rule_id, migrated.review_status, migrated.manually_resolved),
+                             ('EXPENSE', wants.pk, 'WANTS', expense.pk, 'NOT_REQUIRED', False))
         finally:
             executor = MigrationExecutor(connection)
             executor.migrate(executor.loader.graph.leaf_nodes())

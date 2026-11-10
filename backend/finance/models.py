@@ -57,14 +57,13 @@ class RuleMatchType(models.TextChoices):
     EQUALS = 'EQUALS', 'Equals'
 
 
-class RuleKind(models.TextChoices):
-    EXPENSE_CATEGORY = 'EXPENSE_CATEGORY', 'Expense categorization'
-    SAVINGS_TRANSFER = 'SAVINGS_TRANSFER', 'Savings transfer'
-
-
 class RuleClassification(models.TextChoices):
     EXPENSE = TransactionClassification.EXPENSE, 'Expense'
+    INCOME = TransactionClassification.INCOME, 'Income'
+    REFUND = TransactionClassification.REFUND, 'Refund'
+    OTHER_INFLOW = TransactionClassification.OTHER_INFLOW, 'Other inflow'
     TRANSFER = TransactionClassification.TRANSFER, 'Transfer'
+    EXCLUDED = TransactionClassification.EXCLUDED, 'Excluded'
 
 
 class Account(models.Model):
@@ -158,17 +157,12 @@ class CategorizationRule(models.Model):
         default=RuleMatchType.CONTAINS,
     )
     match_value = models.CharField(max_length=200)
-    rule_kind = models.CharField(
-        max_length=20,
-        choices=RuleKind.choices,
-        default=RuleKind.EXPENSE_CATEGORY,
-    )
-    # EXPENSE_CATEGORY: required classification (never changed). SAVINGS_TRANSFER: resulting classification.
     classification = models.CharField(
-        max_length=10,
+        max_length=20,
         choices=RuleClassification.choices,
         default=RuleClassification.EXPENSE,
     )
+    allow_unknown = models.BooleanField(default=False)
     savings_effect = models.CharField(
         max_length=12,
         choices=SavingsEffect.choices,
@@ -178,6 +172,8 @@ class CategorizationRule(models.Model):
         Subcategory,
         on_delete=models.PROTECT,
         related_name='categorization_rules',
+        null=True,
+        blank=True,
     )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -200,23 +196,27 @@ class CategorizationRule(models.Model):
             ),
             models.CheckConstraint(
                 condition=(
-                    Q(
-                        rule_kind=RuleKind.EXPENSE_CATEGORY,
-                        classification=TransactionClassification.EXPENSE,
-                        savings_effect=SavingsEffect.NONE,
-                    )
-                    | Q(
-                        rule_kind=RuleKind.SAVINGS_TRANSFER,
-                        classification=TransactionClassification.TRANSFER,
+                    Q(classification__in=(TransactionClassification.EXPENSE, TransactionClassification.REFUND),
+                      savings_effect=SavingsEffect.NONE, subcategory__isnull=False)
+                    | Q(classification=TransactionClassification.OTHER_INFLOW, savings_effect=SavingsEffect.NONE)
+                    | Q(classification__in=(TransactionClassification.INCOME, TransactionClassification.EXCLUDED),
+                        savings_effect=SavingsEffect.NONE, subcategory__isnull=True)
+                    | Q(classification=TransactionClassification.TRANSFER, savings_effect=SavingsEffect.NONE,
+                        subcategory__isnull=True)
+                    | Q(classification=TransactionClassification.TRANSFER,
                         savings_effect__in=(SavingsEffect.CONTRIBUTION, SavingsEffect.WITHDRAWAL),
-                    )
+                        subcategory__isnull=False)
                 ),
-                name='valid_rule_kind_action',
+                name='valid_rule_outcome',
+            ),
+            models.CheckConstraint(
+                condition=Q(classification=TransactionClassification.EXPENSE) | Q(allow_unknown=False),
+                name='rule_unknown_scope_expense_only',
             ),
         ]
 
     def __str__(self):
-        return self.name.strip() or f'{self.rule_kind} description {self.match_type} "{self.match_value}"'
+        return self.name.strip() or f'{self.classification} description {self.match_type} "{self.match_value}"'
 
 
 class BudgetTargetSettings(models.Model):
@@ -268,6 +268,7 @@ class Transaction(models.Model):
         blank=True,
     )
     categorization_rule_conflict = models.BooleanField(default=False)
+    manually_resolved = models.BooleanField(default=False)
     date = models.DateField()
     posted_date = models.DateField(null=True, blank=True)
     raw_description = models.TextField()
@@ -396,6 +397,12 @@ class Transaction(models.Model):
         ):
             if not self.subcategory_id or self.budget_bucket not in self.eligible_buckets(self.classification):
                 blockers.append('SUBCATEGORY_REQUIRED')
+        if self.savings_effect != SavingsEffect.NONE and (
+            self.classification != TransactionClassification.TRANSFER
+            or not self.subcategory_id
+            or self.budget_bucket != BudgetBucket.SAVINGS
+        ):
+            blockers.append('SAVINGS_EFFECT_INVALID')
         return blockers
 
     def review_reasons(self):
@@ -414,7 +421,8 @@ class Transaction(models.Model):
                 'review_status': f'This transaction cannot be marked reviewed: {", ".join(blockers)}.'
             })
         self.review_status = ReviewStatus.REVIEWED
-        self.save(update_fields=('review_status', 'updated_at'))
+        self.manually_resolved = True
+        self.save(update_fields=('review_status', 'manually_resolved', 'updated_at'))
 
     def save(self, *args, **kwargs):
         update_fields = kwargs.get('update_fields')
@@ -430,7 +438,32 @@ class Transaction(models.Model):
             ).first()
 
         classification_changed = previous is not None and previous['classification'] != self.classification
+        if (
+            classification_changed
+            and self.classification != TransactionClassification.TRANSFER
+            and self.savings_effect == previous['savings_effect']
+            and self.savings_effect != SavingsEffect.NONE
+        ):
+            self.savings_effect = SavingsEffect.NONE
+            changed_fields.add('savings_effect')
+        if (
+            previous is not None
+            and self.classification == TransactionClassification.TRANSFER
+            and self.savings_effect == SavingsEffect.NONE
+            and previous['savings_effect'] != SavingsEffect.NONE
+            and self.subcategory_id == previous['subcategory_id']
+        ):
+            self.subcategory = None
+            self.budget_bucket = ''
+            changed_fields.update(('subcategory', 'budget_bucket'))
         subcategory_changed = previous is None or previous['subcategory_id'] != self.subcategory_id
+        if self.manually_resolved and (
+            self.classification == TransactionClassification.UNKNOWN
+            or (self.classification in (TransactionClassification.EXPENSE, TransactionClassification.REFUND)
+                and not self.subcategory_id)
+        ):
+            self.manually_resolved = False
+            changed_fields.add('manually_resolved')
         assignment_unchanged = (
             previous is not None
             and not classification_changed
@@ -443,9 +476,6 @@ class Transaction(models.Model):
         ) and self.categorized_by_rule_id == previous['categorized_by_rule_id']:
             self.categorized_by_rule = None
             changed_fields.add('categorized_by_rule')
-        if self.categorization_rule_conflict and (self.subcategory_id or classification_changed):
-            self.categorization_rule_conflict = False
-            changed_fields.add('categorization_rule_conflict')
         if self.subcategory_id:
             eligible_buckets = self.eligible_buckets(self.classification)
             if assignment_unchanged:
@@ -482,6 +512,25 @@ class Transaction(models.Model):
         elif self.budget_bucket:
             self.budget_bucket = ''
             changed_fields.add('budget_bucket')
+        if (
+            self.classification == TransactionClassification.TRANSFER
+            and self.savings_effect == SavingsEffect.NONE
+            and self.subcategory_id
+            and not (assignment_unchanged and previous['savings_effect'] == SavingsEffect.NONE)
+        ):
+            raise ValidationError({'subcategory': 'Ordinary Transfers cannot be assigned a subcategory.'})
+        if (
+            previous is not None
+            and self.classification == TransactionClassification.TRANSFER
+            and previous['savings_effect'] == SavingsEffect.NONE
+            and self.savings_effect != SavingsEffect.NONE
+            and assignment_unchanged
+            and self.subcategory_id
+            and (not self.subcategory.is_active or not self.subcategory_matches_classification(
+                self.subcategory, TransactionClassification.TRANSFER,
+            ))
+        ):
+            raise ValidationError({'subcategory': 'Choose an active Savings subcategory for new Savings activity.'})
         if self.savings_effect != SavingsEffect.NONE and (
             self.classification != TransactionClassification.TRANSFER
             or not self.subcategory_id
@@ -506,7 +555,7 @@ class Transaction(models.Model):
             self.review_status = ReviewStatus.PENDING
         elif self.classification == TransactionClassification.TRANSFER and (
             previous is None or previous['classification'] != self.classification
-        ) and not (self.categorized_by_rule_id and self.savings_effect != SavingsEffect.NONE):
+        ) and not self.categorized_by_rule_id:
             self.review_status = ReviewStatus.PENDING
         elif previous is None:
             self.review_status = (

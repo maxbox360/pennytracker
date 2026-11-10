@@ -173,7 +173,7 @@ def commit_import(account: Account, filename: str, content: bytes, parsed: Parse
                         if row['_categorization']['subcategory'] else None
                     ),
                     budget_bucket=(
-                        row['_categorization']['subcategory'].budget_bucket
+                        row['_categorization']['subcategory'].budget_bucket or ''
                         if row['_categorization']['subcategory'] else ''
                     ),
                     categorized_by_rule_id=(
