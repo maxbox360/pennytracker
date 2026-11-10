@@ -82,6 +82,17 @@ function formatAmount(amount: string) {
   return `${negative ? '-' : ''}$${groupedWhole}.${fraction.padEnd(2, '0')}`
 }
 
+function apiErrorMessage(result: unknown, status: number): string {
+  const data = (result ?? {}) as Record<string, unknown>
+  if (typeof data.detail === 'string') return data.detail
+  const first = Object.entries(data).find(([, value]) => Array.isArray(value) && typeof value[0] === 'string')
+  if (first) {
+    const [field, messages] = first as [string, string[]]
+    return field === 'non_field_errors' ? messages[0] : `${field[0].toUpperCase()}${field.slice(1).replace(/_/g, ' ')}: ${messages[0]}`
+  }
+  return `The import request failed (${status}). Please try again.`
+}
+
 function App() {
   const [reload, setReload] = useState(0)
   const [reviewReason, setReviewReason] = useState('')
@@ -139,7 +150,7 @@ function App() {
         body: formData,
       })
       const result = await response.json()
-      if (!response.ok) throw new Error(result.detail || `Request failed (${response.status})`)
+      if (!response.ok) throw new Error(apiErrorMessage(result, response.status))
       if (action === 'preview') {
         setPreview(result as Preview)
       } else {
@@ -153,6 +164,21 @@ function App() {
       setImporting(false)
     }
   }
+
+  const previewHint = importing
+    ? 'Preview is being generated.'
+    : !accountId && !file
+      ? 'Select an account and choose a CSV file to continue.'
+      : !accountId
+        ? 'Select an account to preview this import.'
+        : !file
+          ? 'Choose a CSV file to preview this import.'
+          : ''
+  const confirmHint = !preview || importing || preview.can_import
+    ? ''
+    : preview.already_imported
+      ? 'This exact file was already imported to this account, so it cannot be imported again.'
+      : 'Confirm is unavailable because the file has invalid rows. Fix the CSV and preview it again.'
 
   const previewing = view === 'transactions' && preview !== null
 
@@ -331,6 +357,8 @@ function App() {
             </div>
             )}
 
+            {!preview && previewHint && !importError && <p className="import-hint">{previewHint}</p>}
+            {confirmHint && <p className="import-hint" role="status">{confirmHint}</p>}
             {importError && <p className="message message--error" role="alert">{importError}</p>}
             {preview && (
               <div className="preview-content">

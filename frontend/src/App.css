@@ -1614,3 +1614,9 @@ td.amount-cell {
   cursor: pointer;
   font: inherit;
 }
+
+.import-hint {
+  margin: 8px 0 0;
+  color: var(--muted, #667085);
+  font-size: 0.85rem;
+}
