@@ -381,14 +381,8 @@ class Transaction(models.Model):
             and subcategory.budget_bucket in Transaction.eligible_buckets(classification)
         )
 
-    def review_blockers(self):
-        if self.duplicate_resolution == DuplicateResolution.CONFIRMED_DUPLICATE:
-            return []
+    def financial_blockers(self):
         blockers = []
-        if self.duplicate_resolution == DuplicateResolution.UNRESOLVED:
-            blockers.append('UNRESOLVED_DUPLICATE')
-        if self.categorization_rule_conflict:
-            blockers.append('RULE_CONFLICT')
         if self.classification == TransactionClassification.UNKNOWN:
             blockers.append('UNKNOWN_CLASSIFICATION')
         if self.classification in (
@@ -404,6 +398,23 @@ class Transaction(models.Model):
         ):
             blockers.append('SAVINGS_EFFECT_INVALID')
         return blockers
+
+    def review_blockers(self):
+        if self.duplicate_resolution == DuplicateResolution.CONFIRMED_DUPLICATE:
+            return []
+        blockers = []
+        if self.duplicate_resolution == DuplicateResolution.UNRESOLVED:
+            blockers.append('UNRESOLVED_DUPLICATE')
+        if self.categorization_rule_conflict:
+            blockers.append('RULE_CONFLICT')
+        return blockers + self.financial_blockers()
+
+    def reconcile_financial_resolution(self):
+        complete = not self.financial_blockers()
+        self.manually_resolved = complete
+        if complete:
+            self.categorization_rule_conflict = False
+        return complete
 
     def review_reasons(self):
         reasons = self.review_blockers()
@@ -522,7 +533,7 @@ class Transaction(models.Model):
         if (
             previous is not None
             and self.classification == TransactionClassification.TRANSFER
-            and previous['savings_effect'] == SavingsEffect.NONE
+            and previous['savings_effect'] != self.savings_effect
             and self.savings_effect != SavingsEffect.NONE
             and assignment_unchanged
             and self.subcategory_id

@@ -49,3 +49,18 @@ In another terminal, run `cd frontend && npm install && npm run dev`, then open 
 .venv/bin/python backend/manage.py test finance
 cd frontend && npm run build
 ```
+
+The optional Review browser regression requires Node 22+ and Chrome. It uses synthetic fixtures
+and a **disposable empty database**; from the repository root, run:
+
+```sh
+export DJANGO_DB_PATH="$(mktemp -d)/pennytracker.sqlite3"
+.venv/bin/python backend/manage.py migrate
+PENNYTRACKER_BROWSER_FIXTURES=1 .venv/bin/python backend/manage.py shell < frontend/tests/review-browser-fixtures.py
+DJANGO_CSRF_TRUSTED_ORIGINS=http://127.0.0.1:15173 .venv/bin/python backend/manage.py runserver 127.0.0.1:18080
+```
+
+In another terminal, run `cd frontend && VITE_API_PROXY_TARGET=http://127.0.0.1:18080 npm run dev -- --host 127.0.0.1 --port 15173 --strictPort`.
+Open that frontend in Chrome with `--remote-debugging-port=19222` and a separate temporary Chrome profile,
+then run `npm --prefix frontend run test:review-browser` from the repository root. The fixture script refuses
+to seed a nonempty ledger; the browser test modifies its synthetic data and expects a fresh seed.

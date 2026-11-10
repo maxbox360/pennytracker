@@ -127,6 +127,16 @@ function financialIntent(draft: Draft, original: Transaction) {
     || (draft.subcategory ? Number(draft.subcategory) : null) !== original.subcategory
 }
 
+function canRememberOutcome(draft: Draft, subcategory: Subcategory | undefined) {
+  if (draft.classification === 'UNKNOWN') return false
+  if (draft.subcategory && (!subcategory?.is_active || !acceptsSubcategory(draft.classification, subcategory))) return false
+  if (draft.classification === 'EXPENSE' || draft.classification === 'REFUND') return Boolean(subcategory)
+  if (draft.classification === 'TRANSFER') {
+    return draft.savings_effect === 'NONE' ? !draft.subcategory : Boolean(subcategory)
+  }
+  return true
+}
+
 function ruleIneligibility(draft: Draft, subcategory: Subcategory | undefined, original: Transaction) {
   if (!normalizedRuleValue(draft.ruleMatchValue)) return 'Enter a match value.'
   if (!financialIntent(draft, original)) {
@@ -307,7 +317,7 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
     const original = transactions.find((item) => item.id === editingId)
     if (!original) return
     setError('')
-    const reviewing = mode === 'review'
+    const reviewing = mode === 'review' && original.review_status === 'PENDING'
     const subcategory = draft.subcategory ? Number(draft.subcategory) : null
     const changed: Record<string, unknown> = {}
     if (draft.classification !== original.classification) changed.classification = draft.classification
@@ -448,11 +458,14 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
     if (!response.ok) throw new Error(errorText(result))
     const created = result.subcategory as Subcategory
     setSubcategories((current) => [...current, created])
+    setAllSubcategories((current) => [...current, created])
     setTransactions((current) => current.map((item) => item.id === id ? result.transaction as Transaction : item))
     setDraft((current) => current ? {
       ...current,
       classification: result.transaction.classification,
+      savings_effect: result.transaction.savings_effect,
       subcategory: String(created.id),
+      resolveConflict: result.transaction.categorization_rule_conflict ? current.resolveConflict : false,
     } : current)
     setNotice('Subcategory created and assigned.')
     return created
@@ -653,12 +666,18 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
                   editing={editingId === item.id}
                   draft={editingId === item.id ? draft : null}
                   subcategories={subcategories}
+                  allSubcategories={allSubcategories}
                   onSelect={() => setSelected((current) => current.includes(item.id)
                     ? current.filter((id) => id !== item.id)
                     : [...current, item.id])}
                   onEdit={() => beginEdit(item)}
                   onCancel={() => { setEditingId(null); setDraft(null) }}
-                  onDraft={(value) => setDraft(value)}
+                  onDraft={(value) => setDraft({
+                    ...value,
+                    rememberRule: value.rememberRule && canRememberOutcome(
+                      value, allSubcategories.find((category) => category.id === Number(value.subcategory)),
+                    ),
+                  })}
                   onSave={saveEdit}
                   onCreateSubcategory={createSubcategory}
                   reviewStatusLabel={reviewStatusLabels[item.review_status]}
@@ -728,6 +747,7 @@ type RowProps = {
   editing: boolean
   draft: Draft | null
   subcategories: Subcategory[]
+  allSubcategories: Subcategory[]
   onSelect: () => void
   onEdit: () => void
   onCancel: () => void
@@ -746,7 +766,8 @@ type RowProps = {
 }
 
 function FragmentRow(props: RowProps) {
-  const { item, mode, columnCount, selected, editing, draft, subcategories, reviewStatusLabel } = props
+  const { item, mode, columnCount, selected, editing, draft, subcategories, allSubcategories, reviewStatusLabel } = props
+  const reviewing = mode === 'review' && item.review_status === 'PENDING'
   const [candidateId, setCandidateId] = useState<number | ''>(item.duplicate_candidates[0]?.id ?? '')
   const [createName, setCreateName] = useState('')
   const [createBucket, setCreateBucket] = useState<Bucket>('NEEDS')
@@ -758,8 +779,12 @@ function FragmentRow(props: RowProps) {
   const assignableBuckets = draft && !(draft.classification === 'TRANSFER' && draft.savings_effect === 'NONE')
     ? eligibleBuckets(draft.classification) : []
   const selectedSubcategory = draft
-    ? subcategories.find((category) => category.id === Number(draft.subcategory))
+    ? allSubcategories.find((category) => category.id === Number(draft.subcategory))
     : undefined
+  const retainedSubcategory = draft && draft.classification === item.classification
+    && draft.subcategory === String(item.subcategory)
+    && selectedSubcategory && !eligibleSubcategories.some((category) => category.id === selectedSubcategory.id)
+    ? selectedSubcategory : undefined
   const outcomeNeedsSubcategory = draft
     ? (draft.classification === 'EXPENSE' || draft.classification === 'REFUND'
       || (draft.classification === 'TRANSFER' && draft.savings_effect !== 'NONE')) && !selectedSubcategory
@@ -812,7 +837,7 @@ function FragmentRow(props: RowProps) {
         <td className={`amount-cell ${item.amount.startsWith('-') ? 'amount-negative' : 'amount-positive'}`}>{formatAmount(item.amount)}</td>
         <td className="row-actions">
           <button type="button" onClick={props.onEdit}>Edit</button>
-          {mode === 'review' && (
+          {reviewing && (
             <button type="button" onClick={props.onMarkReviewed}>Mark reviewed</button>
           )}
         </td>
@@ -821,7 +846,7 @@ function FragmentRow(props: RowProps) {
         <tr className="detail-row">
           <td colSpan={columnCount}>
             <form className="transaction-editor" onSubmit={(event) => {
-              if (draft.rememberRule && ruleProblem) {
+              if (reviewing && draft.rememberRule && ruleProblem) {
                 event.preventDefault()
                 return
               }
@@ -857,7 +882,7 @@ function FragmentRow(props: RowProps) {
                     onChange={(event) => props.onDraft({
                       ...draft,
                       savings_effect: event.target.value as SavingsEffect,
-                      subcategory: event.target.value === 'NONE' ? '' : draft.subcategory,
+                      subcategory: event.target.value === 'NONE' || retainedSubcategory ? '' : draft.subcategory,
                     })}
                   >
                     <option value="NONE">Not savings</option>
@@ -885,6 +910,11 @@ function FragmentRow(props: RowProps) {
                   })}
                 >
                   <option value="">No subcategory</option>
+                  {retainedSubcategory && (
+                    <option value={retainedSubcategory.id} disabled>
+                      {retainedSubcategory.name} · retained {retainedSubcategory.is_active ? 'historical' : 'archived'}
+                    </option>
+                  )}
                   {eligibleSubcategories.map((subcategory) => (
                     <option key={subcategory.id} value={subcategory.id}>
                       {subcategory.name} · {subcategory.budget_bucket
@@ -894,7 +924,7 @@ function FragmentRow(props: RowProps) {
                   ))}
                 </select>
               </label>}
-              {mode === 'review' && (assignableBuckets.length > 0 || draft.classification === 'OTHER_INFLOW') && (
+              {reviewing && (assignableBuckets.length > 0 || draft.classification === 'OTHER_INFLOW') && (
                 <details className="inline-category-create">
                   <summary>+ Create new subcategory</summary>
                   <div className="inline-category-fields">
@@ -955,7 +985,7 @@ function FragmentRow(props: RowProps) {
                   </div>
                 </details>
               )}
-              {mode === 'review' && item.categorization_rule_conflict && (
+              {reviewing && item.categorization_rule_conflict && (
                 <label className="remember-rule-toggle">
                   <input
                     type="checkbox"
@@ -965,7 +995,7 @@ function FragmentRow(props: RowProps) {
                   Resolve this rule conflict with the outcome above
                 </label>
               )}
-              {mode === 'review' && item.review_status === 'PENDING' && draft.classification !== 'UNKNOWN' && !outcomeNeedsSubcategory && (
+              {reviewing && draft.classification !== 'UNKNOWN' && !outcomeNeedsSubcategory && (
                 <label className="remember-rule-toggle">
                   <input
                     type="checkbox"
@@ -975,7 +1005,7 @@ function FragmentRow(props: RowProps) {
                   Confirm this financial outcome
                 </label>
               )}
-              {mode === 'review' && draft.classification !== 'UNKNOWN' && (
+              {reviewing && canRememberOutcome(draft, selectedSubcategory) && (
                 <div className="remember-rule">
                   <label className="remember-rule-toggle">
                     <input

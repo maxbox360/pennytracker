@@ -322,16 +322,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             validated_data['categorized_by_rule'] = None
         instance = super().update(instance, validated_data)
         if before != (instance.classification, instance.subcategory_id, instance.savings_effect):
-            complete = (
-                instance.classification != TransactionClassification.UNKNOWN
-                and not (instance.classification in (
-                    TransactionClassification.EXPENSE, TransactionClassification.REFUND,
-                ) and (not instance.subcategory_id or instance.budget_bucket not in
-                       Transaction.eligible_buckets(instance.classification)))
-            )
-            instance.manually_resolved = complete
-            if complete:
-                instance.categorization_rule_conflict = False
+            instance.reconcile_financial_resolution()
             instance.save(update_fields=('manually_resolved', 'categorization_rule_conflict', 'updated_at'))
         return instance
 
@@ -426,7 +417,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             if (
                 classification == TransactionClassification.TRANSFER
                 and subcategory and self.instance is not None
-                and self.instance.savings_effect == SavingsEffect.NONE
+                and self.instance.savings_effect != savings_effect
                 and assignment_unchanged
                 and (not subcategory.is_active or not Transaction.subcategory_matches_classification(
                     subcategory, TransactionClassification.TRANSFER,

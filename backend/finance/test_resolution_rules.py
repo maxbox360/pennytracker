@@ -6,6 +6,7 @@ from unittest.mock import patch
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient, APITestCase
 
+from .categorization_rules import evaluate_transaction
 from .models import (
     Account,
     BudgetBucket,
@@ -344,6 +345,22 @@ class ApplyToPendingEligibilityTests(ResolutionTestCase):
                 )
                 self.assertIsNone(record.categorized_by_rule)
 
+    def test_rule_resolved_pending_ordinary_transfer_is_not_unresolved(self):
+        ordinary = self.make_rule('EXAMPLE MOVE', 'TRANSFER', None, 'NONE')
+        record = self.txn('EXAMPLE MOVE 123', duplicate_resolution=DuplicateResolution.UNRESOLVED)
+        self.assertEqual(self.apply(ordinary)['updated_count'], 1)
+        record.refresh_from_db()
+        self.assertEqual((record.classification, record.savings_effect, record.subcategory_id,
+                          record.categorized_by_rule_id, record.review_status, record.manually_resolved),
+                         ('TRANSFER', 'NONE', None, ordinary.pk, ReviewStatus.PENDING, False))
+        savings = self.make_rule('EXAMPLE MOVE 123', 'TRANSFER', self.fund.pk, 'CONTRIBUTION',
+                                 match_type='STARTS_WITH')
+        self.assertEqual(evaluate_transaction(record, [savings])['rules'], [])
+        self.assertEqual(self.apply(savings)['updated_count'], 0)
+        record.refresh_from_db()
+        self.assertEqual((record.savings_effect, record.subcategory_id, record.categorized_by_rule_id,
+                          record.review_status), ('NONE', None, ordinary.pk, ReviewStatus.PENDING))
+
     def test_identical_outcomes_from_overlapping_rules_do_not_conflict(self):
         broad = self.make_rule('ACME')
         self.make_rule('ACME WIDGETS', match_type='STARTS_WITH')
@@ -500,10 +517,28 @@ class ReviewSaveTests(ResolutionTestCase):
         record = self.txn('EXAMPLE TRANSFER', duplicate_resolution=DuplicateResolution.UNRESOLVED)
         self.assertEqual(self.review_save(record, classification='TRANSFER').status_code, 200)
         rule = self.make_rule('EXAMPLE TRANSFER', 'TRANSFER', self.fund.pk, 'CONTRIBUTION')
+        record.refresh_from_db()
+        self.assertEqual(evaluate_transaction(record, [rule])['rules'], [])
         self.assertEqual(self.client.post(f'{BASE}{rule.pk}/apply-to-pending/').status_code, 200)
         record.refresh_from_db()
         self.assertEqual((record.manually_resolved, record.savings_effect, record.subcategory_id,
                           record.review_status), (True, 'NONE', None, ReviewStatus.PENDING))
+
+    def test_archived_savings_assignment_is_retained_only_for_unrelated_edits(self):
+        record = self.txn('EXAMPLE HISTORICAL', 'TRANSFER', subcategory=self.fund,
+                           savings_effect='CONTRIBUTION', duplicate_resolution=DuplicateResolution.UNRESOLVED)
+        self.fund.is_active = False
+        self.fund.save()
+        for field, value in (('notes', 'Synthetic note'), ('merchant', 'Synthetic merchant')):
+            response = self.review_save(record, **{field: value})
+            self.assertEqual(response.status_code, 200, response.content)
+            self.assertEqual(self.refreshed(record).subcategory_id, self.fund.pk)
+        self.assertEqual(self.review_save(record, savings_effect='WITHDRAWAL').status_code, 400)
+        other = self.txn('EXAMPLE NEW')
+        self.assertEqual(self.review_save(other, classification='TRANSFER', savings_effect='CONTRIBUTION',
+                                           subcategory=self.fund.pk).status_code, 400)
+        self.assertEqual(self.review_save(record, savings_effect='WITHDRAWAL', subcategory=self.goal.pk).status_code, 200)
+        self.assertEqual(self.refreshed(record).subcategory_id, self.goal.pk)
 
     def test_unknown_can_be_resolved_to_every_outcome(self):
         cases = (
@@ -702,6 +737,40 @@ class ReviewSaveTests(ResolutionTestCase):
         self.assertEqual(record.review_status, ReviewStatus.NOT_REQUIRED)
         self.review_save(record, notes='annotated')
         self.assertEqual(self.refreshed(record).review_status, ReviewStatus.NOT_REQUIRED)
+
+    def test_bulk_financial_changes_reconcile_conflicts_without_reviewing(self):
+        income = self.txn('BULK INCOME', categorization_rule_conflict=True,
+                          duplicate_resolution=DuplicateResolution.UNRESOLVED)
+        incomplete = self.txn('BULK INCOMPLETE', categorization_rule_conflict=True)
+        expense = self.txn('BULK EXPENSE', 'EXPENSE', categorization_rule_conflict=True)
+        for record, payload in (
+            (income, {'operation': 'classification', 'classification': 'INCOME'}),
+            (incomplete, {'operation': 'classification', 'classification': 'EXPENSE'}),
+            (expense, {'operation': 'subcategory', 'subcategory': self.needs.pk}),
+        ):
+            response = self.client.post('/api/transactions/bulk/', {
+                **payload, 'transaction_ids': [record.pk],
+            }, format='json')
+            self.assertEqual(response.status_code, 200, response.content)
+        income.refresh_from_db()
+        incomplete.refresh_from_db()
+        expense.refresh_from_db()
+        self.assertEqual(income.review_blockers(), ['UNRESOLVED_DUPLICATE'])
+        self.assertTrue(income.manually_resolved)
+        self.assertEqual(incomplete.review_blockers(), ['RULE_CONFLICT', 'SUBCATEGORY_REQUIRED'])
+        self.assertFalse(incomplete.manually_resolved)
+        self.assertFalse(expense.categorization_rule_conflict)
+        self.assertTrue(expense.manually_resolved)
+        self.assertTrue(all(record.review_status == ReviewStatus.PENDING for record in (income, incomplete, expense)))
+
+    def test_inline_category_assignment_clears_complete_financial_conflict(self):
+        record = self.conflicted()
+        response = self.client.post(f'/api/transactions/{record.pk}/create-subcategory-and-assign/', {
+            'name': 'Synthetic inline', 'budget_bucket': 'NEEDS', 'classification': 'EXPENSE',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertFalse(response.json()['transaction']['categorization_rule_conflict'])
+        self.assertEqual(self.review_save(record, notes='Synthetic note').status_code, 200)
 
 
 class SaveWithRuleTests(ResolutionTestCase):

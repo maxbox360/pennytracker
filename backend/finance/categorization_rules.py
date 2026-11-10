@@ -120,10 +120,20 @@ def evaluate_rules(classification, raw_description, rules, transfer_unresolved=T
     }
 
 
+def transfer_is_unresolved(record):
+    return (
+        record.classification == TransactionClassification.TRANSFER
+        and record.savings_effect == SavingsEffect.NONE
+        and record.subcategory_id is None
+        and not record.manually_resolved
+        and record.categorized_by_rule_id is None
+    )
+
+
 def evaluate_transaction(record, rules):
     return evaluate_rules(
         record.classification, record.raw_description, rules,
-        transfer_unresolved=record.savings_effect == SavingsEffect.NONE,
+        transfer_unresolved=transfer_is_unresolved(record),
         subcategory_id=record.subcategory_id, manually_resolved=record.manually_resolved,
     )
 
@@ -154,7 +164,8 @@ def pending_candidates(rule):
                            savings_effect=SavingsEffect.NONE, manually_resolved=False)
     elif rule.classification == TransactionClassification.TRANSFER and rule.savings_effect != SavingsEffect.NONE:
         condition |= Q(classification=TransactionClassification.TRANSFER, subcategory__isnull=True,
-                       savings_effect=SavingsEffect.NONE, manually_resolved=False)
+                       savings_effect=SavingsEffect.NONE, manually_resolved=False,
+                       categorized_by_rule__isnull=True)
     return Transaction.objects.filter(condition, review_status=ReviewStatus.PENDING)
 
 

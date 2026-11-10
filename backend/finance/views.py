@@ -497,20 +497,15 @@ class TransactionViewSet(ModelViewSet):
             raise ValidationError({'resolve_rule_conflict': 'Use true or false.'})
         if not isinstance(confirm_financial, bool):
             raise ValidationError({'confirm_financial_outcome': 'Use true or false.'})
-        financial_blockers = {
-            'UNKNOWN_CLASSIFICATION', 'SUBCATEGORY_REQUIRED', 'SAVINGS_EFFECT_INVALID',
-        }
-        complete = not financial_blockers.intersection(record.review_blockers())
+        complete = not record.financial_blockers()
         if explicit_conflict and (not had_conflict or not complete):
             raise ValidationError({'resolve_rule_conflict': 'Choose a complete financial outcome to resolve the conflict.'})
         if confirm_financial and (not complete or (had_conflict and not (changed or explicit_conflict))):
             raise ValidationError({'confirm_financial_outcome': 'Choose a complete financial outcome and resolve any conflict.'})
         if changed or explicit_conflict or confirm_financial:
-            record.manually_resolved = complete
+            record.reconcile_financial_resolution()
             if explicit_conflict or confirm_financial:
                 record.categorized_by_rule = None
-            if complete and record.categorization_rule_conflict:
-                record.categorization_rule_conflict = False
             if complete:
                 record.review_status = (
                     ReviewStatus.PENDING if record.review_blockers() else ReviewStatus.REVIEWED
@@ -746,7 +741,6 @@ class TransactionViewSet(ModelViewSet):
                         raise ValidationError({'classification': 'Choose a valid classification.'})
                     for record in records:
                         record.classification = classification
-                        record.manually_resolved = classification == TransactionClassification.TRANSFER
                         if classification != TransactionClassification.TRANSFER:
                             record.savings_effect = Transaction.SavingsEffect.NONE
                         record.save(update_fields=(
@@ -757,6 +751,10 @@ class TransactionViewSet(ModelViewSet):
                             'review_status',
                             'manually_resolved',
                             'updated_at',
+                        ))
+                        record.reconcile_financial_resolution()
+                        record.save(update_fields=(
+                            'manually_resolved', 'categorization_rule_conflict', 'updated_at',
                         ))
                 elif operation == 'subcategory':
                     subcategory_id = request.data.get('subcategory')
@@ -784,6 +782,10 @@ class TransactionViewSet(ModelViewSet):
                             'categorization_rule_conflict',
                             'review_status',
                             'updated_at',
+                        ))
+                        record.reconcile_financial_resolution()
+                        record.save(update_fields=(
+                            'manually_resolved', 'categorization_rule_conflict', 'updated_at',
                         ))
                 elif operation == 'mark_reviewed':
                     blocked = {
