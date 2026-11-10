@@ -110,6 +110,12 @@ Implement one milestone at a time; keep the application runnable and verify each
 - Kept Refund and Transfer accounting unchanged. Categorization rules remain Expense-only; Other Inflow rules, P2P inference, Net Cash Flow, transfer pairing, and gambling analytics remain deferred.
 - Added an Other Inflows group to Categories and classification-aware optional Subcategory assignment in the transaction editor.
 
+## Post-core reporting refinement — Flexible ranges
+
+- Add calendar-based YTD, 7-day, 30-day, and inclusive custom ranges alongside the existing All Time → Year → Month hierarchy.
+- Reuse the shared accounting, current targets, completeness, allocation donut, and server-paginated drilldowns. Group short-range trends by day and longer ranges by month; only transactions within the selected dates contribute.
+- Keep saved ranges, prior-period comparisons, export, and other post-core features out of scope.
+
 ## Later, only when useful
 
 - Debt records and balance snapshots, including optional extra-paydown goals.

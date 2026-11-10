@@ -31,6 +31,7 @@ from finance.views import (
     monthly_report_drilldown,
     monthly_report_view,
     preview_import,
+    range_report_view,
     yearly_report_view,
 )
 from finance.csrf import csrf_token
@@ -51,6 +52,7 @@ urlpatterns = [
     path('api/reports/all-time/', all_time_report_view, name='all-time-report'),
     path('api/reports/yearly/', yearly_report_view, name='yearly-report'),
     path('api/reports/monthly/', monthly_report_view, name='monthly-report'),
+    path('api/reports/range/', range_report_view, name='range-report'),
     path('api/reports/monthly/drilldown/', monthly_report_drilldown, name='monthly-report-drilldown'),
     path('api/reports/drilldown/', historical_report_drilldown, name='historical-report-drilldown'),
     path('api/reports/category-trend/', category_trend_view, name='category-trend'),

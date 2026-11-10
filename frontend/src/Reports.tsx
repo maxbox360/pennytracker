@@ -87,6 +87,13 @@ type AllTimeReport = HistoricalReport & {
   }[]
   months: PeriodRow[]
 }
+type RangeReport = ReportBase & {
+  period: { start_date: string; end_date: string }
+  ledger_transaction_count: number
+  trend_granularity: 'day' | 'month'
+  trend_series: TrendPoint[]
+}
+type RangePreset = 'all' | 'ytd' | '30' | '7' | 'custom'
 type Targets = { needs_percent: string; wants_percent: string; savings_percent: string }
 type DrillRow = {
   id: number
@@ -341,7 +348,7 @@ function TrendChart({
   tableLines?: ChartLine[]
   percentage?: boolean
 }) {
-  const width = Math.max(760, points.length * 38)
+  const width = Math.max(760, points.length * (points.some((point) => point.label.length > 7) ? 70 : 38))
   const height = 220
   const left = 54
   const right = 18
@@ -462,7 +469,7 @@ function TrendChart({
       </div>
       <div className="historical-series-table">
         <table>
-          <thead><tr><th>Month</th>{tableLines.map((line) => <th key={line.key}>{line.label}</th>)}<th>Data</th></tr></thead>
+          <thead><tr><th>Period</th>{tableLines.map((line) => <th key={line.key}>{line.label}</th>)}<th>Data</th></tr></thead>
           <tbody>{points.map((point) => {
             const knownZero = tableLines.every((line) => {
               const value = point.values[line.key]
@@ -503,6 +510,7 @@ function summaryPoint(point: TrendPoint): ChartPoint {
       savings_contributions: point.savings_contributions,
       savings_withdrawals: point.savings_withdrawals,
       net_savings_activity: point.net_savings_activity,
+      remaining: point.remaining,
       needs_percent: point.needs_percent,
       wants_percent: point.wants_percent,
       savings_percent: point.savings_percent,
@@ -513,15 +521,28 @@ function summaryPoint(point: TrendPoint): ChartPoint {
   }
 }
 
-function isMonthlyReport(report: AllTimeReport | YearReport | MonthlyReport): report is MonthlyReport {
+function isMonthlyReport(report: AllTimeReport | YearReport | MonthlyReport | RangeReport): report is MonthlyReport {
   return 'month' in report.period
 }
 
-export default function Reports({ reload, onReview }: { reload: number; onReview: (reason: string) => void }) {
-  const [level, setLevel] = useState<'all' | 'year' | 'month'>('all')
+function localDate(value: Date) {
+  return `${value.getFullYear().toString().padStart(4, '0')}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+}
+
+function validDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith('0000')) return false
+  const parsed = new Date(`${value}T00:00:00Z`)
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+}
+
+export default function Reports({ reload, onReview }: { reload: number; onReview: (reason: string, start: string, end: string) => void }) {
+  const [level, setLevel] = useState<'all' | 'year' | 'month' | 'range'>('all')
+  const [preset, setPreset] = useState<RangePreset>('all')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
   const [year, setYear] = useState<number | null>(null)
   const [month, setMonth] = useState<number | null>(null)
-  const [report, setReport] = useState<AllTimeReport | YearReport | MonthlyReport | null>(null)
+  const [report, setReport] = useState<AllTimeReport | YearReport | MonthlyReport | RangeReport | null>(null)
   const [targetDraft, setTargetDraft] = useState<Targets | null>(null)
   const [drillSelection, setDrillSelection] = useState<DrillSelection | null>(null)
   const [drilldown, setDrilldown] = useState<Drilldown | null>(null)
@@ -531,6 +552,31 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const rangeError = level !== 'range' ? '' : !startDate || !endDate
+    ? 'Choose both From and To dates.'
+    : !validDate(startDate) || !validDate(endDate)
+      ? 'Enter valid dates.'
+      : startDate > endDate ? 'From date must be on or before To date.' : ''
+
+  function choosePreset(next: RangePreset) {
+    setPreset(next)
+    setDrillSelection(null)
+    setCategoryTrendId(null)
+    if (next === 'all') {
+      setLevel('all')
+      return
+    }
+    const today = new Date()
+    const first = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+    if (next === 'ytd') first.setMonth(0, 1)
+    if (next === '30') first.setDate(first.getDate() - 29)
+    if (next === '7') first.setDate(first.getDate() - 6)
+    if (next !== 'custom' || !startDate || !endDate) {
+      setStartDate(localDate(first))
+      setEndDate(localDate(today))
+    }
+    setLevel('range')
+  }
 
   useEffect(() => {
     apiFetch('/api/budget-targets/').then(async (response) => {
@@ -542,11 +588,20 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
 
   useEffect(() => {
     let active = true
+    setReport(null)
+    setDrillSelection(null)
+    setCategoryTrendId(null)
+    if (level === 'range' && rangeError) {
+      setLoading(false)
+      return
+    }
     const path = level === 'all'
       ? '/api/reports/all-time/'
       : level === 'year'
         ? `/api/reports/yearly/?year=${year}`
-        : `/api/reports/monthly/?year=${year}&month=${month}`
+        : level === 'month'
+          ? `/api/reports/monthly/?year=${year}&month=${month}`
+          : `/api/reports/range/?${new URLSearchParams({ start_date: startDate, end_date: endDate })}`
     setLoading(true)
     setError('')
     apiFetch(path)
@@ -554,7 +609,7 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
         const result = await response.json()
         if (!response.ok) throw new Error('Unable to load the report.')
         if (!active) return
-        setReport(result as AllTimeReport | YearReport | MonthlyReport)
+        setReport(result as AllTimeReport | YearReport | MonthlyReport | RangeReport)
         if (level === 'all') {
           const allTime = result as AllTimeReport
           if (allTime.years.length && year === null) setYear(allTime.years[allTime.years.length - 1].year)
@@ -565,18 +620,22 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
       })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [level, year, month, reload])
+  }, [level, year, month, reload, startDate, endDate, rangeError])
 
   useEffect(() => {
-    if (!drillSelection || year === null) return
+    if (!drillSelection || (level === 'range' && rangeError)) return
     let active = true
     const params = new URLSearchParams({
-      scope: level === 'month' ? 'month' : level,
-      year: String(year),
+      scope: level,
       metric: drillSelection.metric,
       page: String(drillPage),
     })
+    if (year !== null && (level === 'month' || level === 'year')) params.set('year', String(year))
     if (level === 'month' && month !== null) params.set('month', String(month))
+    if (level === 'range') {
+      params.set('start_date', startDate)
+      params.set('end_date', endDate)
+    }
     if (drillSelection.subcategory) params.set('subcategory', String(drillSelection.subcategory))
     apiFetch(`/api/reports/drilldown/?${params}`)
       .then(async (response) => {
@@ -588,10 +647,10 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
         if (active) setError(failure instanceof Error ? failure.message : 'Unable to load report transactions.')
       })
     return () => { active = false }
-  }, [drillSelection, drillPage, level, year, month])
+  }, [drillSelection, drillPage, level, year, month, startDate, endDate, rangeError])
 
   useEffect(() => {
-    if (categoryTrendId === null || year === null) {
+    if (categoryTrendId === null || year === null || level === 'range') {
       setCategoryTrend(null)
       return
     }
@@ -646,8 +705,8 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
 
   const summary = report?.summary
   const points = useMemo(
-    () => report && 'monthly_series' in report
-      ? report.monthly_series.map(summaryPoint)
+    () => report && ('monthly_series' in report || 'trend_series' in report)
+      ? ('trend_series' in report ? report.trend_series : report.monthly_series).map(summaryPoint)
       : [],
     [report],
   )
@@ -674,20 +733,35 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
   })) || [], [categoryTrend])
 
   function selectCategory(metric: string, title: string, id: number | null) {
-    setCategoryTrendId(metric === 'net_savings_activity' || metric === 'other_inflows' || id === null ? null : id)
+    setCategoryTrendId(level === 'range' || metric === 'net_savings_activity' || metric === 'other_inflows' || id === null ? null : id)
     openDrill(metric, title, id)
   }
 
   return (
     <section className="reports-panel" aria-label="Historical reports">
+      <div className="report-range-controls" aria-label="Report ranges">
+        {([['all', 'All Time'], ['ytd', 'YTD'], ['30', 'Last 30 days'], ['7', 'Last 7 days'], ['custom', 'Custom']] as const).map(([value, label]) => (
+          <button key={value} type="button" className={(value === 'all' ? level === 'all' : level === 'range' && preset === value) ? 'is-active' : ''}
+            aria-pressed={value === 'all' ? level === 'all' : level === 'range' && preset === value}
+            onClick={() => choosePreset(value)}>{label}</button>
+        ))}
+        {level === 'range' && (
+          <div className="report-custom-dates">
+            <label>From <input type="date" value={startDate} onChange={(event) => { setPreset('custom'); setStartDate(event.target.value) }} /></label>
+            <label>To <input type="date" value={endDate} onChange={(event) => { setPreset('custom'); setEndDate(event.target.value) }} /></label>
+          </div>
+        )}
+      </div>
+      {rangeError && <p className="message message--error" role="alert">{rangeError}</p>}
       <nav className="report-breadcrumbs" aria-label="Report hierarchy">
         <button type="button" className={level === 'all' ? 'is-current' : ''} onClick={() => {
           setLevel('all')
           setYear(null)
           setMonth(null)
+          setPreset('all')
           setDrillSelection(null)
         }}>All Time</button>
-        {year !== null && level !== 'all' && <>
+        {year !== null && (level === 'year' || level === 'month') && <>
           <span aria-hidden="true">/</span>
           <button type="button" className={level === 'year' ? 'is-current' : ''} onClick={() => {
             setLevel('year')
@@ -699,6 +773,7 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
           <span aria-hidden="true">/</span>
           <span className="is-current">{formatMonth(year, month)}</span>
         </>}
+        {level === 'range' && <><span aria-hidden="true">/</span><span className="is-current">Selected range</span></>}
       </nav>
       <div className="report-toolbar">
         {level === 'year' && year !== null && (
@@ -728,6 +803,7 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
           </div>
         )}
         {loading && <span className="muted">Loading…</span>}
+        {level === 'range' && !rangeError && <span className="muted">{startDate} to {endDate} · inclusive</span>}
         {level === 'all' && report && 'period' in report && (
           <span className="muted">
             {report.period.start_date && report.period.end_date
@@ -740,8 +816,11 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
       {notice && <p className="table-notice" role="status">{notice}</p>}
       {report && summary && (
         <>
-          <CompletenessNotice completeness={report.data_completeness} onReview={onReview} />
-          {level === 'month' && isMonthlyReport(report) ? (
+          <CompletenessNotice completeness={report.data_completeness} onReview={(reason) => onReview(reason, report.period.start_date || '', report.period.end_date || '')} />
+          {level === 'range' && 'ledger_transaction_count' in report && (
+            <p className="muted">{periodStatus(report.data_completeness, report.ledger_transaction_count, summary)} · {report.ledger_transaction_count} transactions</p>
+          )}
+          {(level === 'range' || (level === 'month' && isMonthlyReport(report))) ? (
             <div className="report-summary-layout">
               <SummaryTable summary={summary} openDrill={openDrill} />
               <section className="report-allocation-chart">
@@ -836,7 +915,7 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
           {level !== 'month' && (
             <>
               <TrendChart
-                title="Monthly amounts"
+                title={level === 'range' && 'trend_granularity' in report && report.trend_granularity === 'day' ? 'Daily amounts' : 'Monthly amounts'}
                 description="Income and allocation amounts by Transaction.date. Remaining is available in the report tables."
                 points={points}
                 lines={dollarLines}
@@ -844,7 +923,7 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
               />
               <TrendChart
                 title="Allocation percentages"
-                description="Monthly share of Income. Dashed references show current targets, not historical target settings."
+                description="Period share of Income. Dashed references show current targets, not historical target settings."
                 points={points}
                 lines={percentageLines}
                 percentage
@@ -896,7 +975,7 @@ function MonthlyDetails({
   report,
   openDrill,
 }: {
-  report: MonthlyReport
+  report: ReportBase
   openDrill: (metric: string, title: string) => void
 }) {
   const components = [
@@ -939,7 +1018,7 @@ function MonthlyDetails({
           Partial data — {report.data_completeness.affected_transaction_count} transactions still require attention.
         </p>
       )}
-      {mode === 'mix' && income > 0n && (
+      {mode === 'mix' && (
         <p className="report-chart-warning">Allocations exceed reported Income by {formatCents(-remaining)}.</p>
       )}
       {unavailableMessage ? (

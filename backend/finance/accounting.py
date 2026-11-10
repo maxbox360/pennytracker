@@ -1,4 +1,5 @@
-from datetime import date
+from calendar import monthrange
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db.models import (
@@ -11,7 +12,7 @@ from django.db.models import (
     Value,
     When,
 )
-from django.db.models.functions import Coalesce, ExtractMonth, ExtractYear
+from django.db.models.functions import Coalesce, ExtractDay, ExtractMonth, ExtractYear
 
 from .models import (
     BudgetBucket,
@@ -467,11 +468,14 @@ def _grouped_values(transactions, grain):
     grouped = transactions.annotate(
         _year=ExtractYear('date'),
         _month=ExtractMonth('date'),
+        _day=ExtractDay('date'),
     )
-    if grain == 'year':
-        grouped = grouped.values('_year')
-    else:
-        grouped = grouped.values('_year', '_month')
+    fields = ['_year']
+    if grain in ('month', 'day'):
+        fields.append('_month')
+    if grain == 'day':
+        fields.append('_day')
+    grouped = grouped.values(*fields)
     metric_names = (
         'income',
         'other_inflows',
@@ -493,8 +497,7 @@ def _grouped_values(transactions, grain):
     # Aggregate expressions are attached to the grouped query, which emits one
     # row per calendar period without loading transactions into Python.
     return list(eligible_groups.values(
-        '_year',
-        *(['_month'] if grain != 'year' else []),
+        *fields,
         *[f'_sum_{name}' for name in metrics],
     ).annotate(ledger_count=Count('pk')))
 
@@ -503,8 +506,13 @@ def _period_map_rows(transactions, grain):
     grouped = transactions.annotate(
         _year=ExtractYear('date'),
         _month=ExtractMonth('date'),
+        _day=ExtractDay('date'),
     )
-    fields = ['_year'] if grain == 'year' else ['_year', '_month']
+    fields = ['_year']
+    if grain in ('month', 'day'):
+        fields.append('_month')
+    if grain == 'day':
+        fields.append('_day')
     return list(
         grouped.values(*fields).annotate(
             ledger_count=Count('pk'),
@@ -614,7 +622,7 @@ def _trend_series(months, targets):
     return [{
         'year': item['period']['year'],
         'month': item['period']['month'],
-        'label': f"{item['period']['year']}-{item['period']['month']:02d}",
+        'label': item['period'].get('label', f"{item['period']['year']}-{item['period']['month']:02d}"),
         'has_transactions': item['ledger_transaction_count'] > 0,
         'is_incomplete': item['data_completeness']['is_incomplete'],
         'affected_transaction_count': item['data_completeness']['affected_transaction_count'],
@@ -695,13 +703,14 @@ def _all_time_months(transactions, earliest, latest, targets):
     while (year, month) <= (latest.year, latest.month):
         summary_row = summaries.get((year, month), {})
         completeness_row = completeness.get((year, month), {})
-        start, end = monthly_bounds(year, month)
+        start = date(year, month, 1)
+        last_day = date(year, month, monthrange(year, month)[1])
         months.append({
             'period': {
                 'year': year,
                 'month': month,
                 'start_date': start.isoformat(),
-                'end_date': (end - date.resolution).isoformat(),
+                'end_date': last_day.isoformat(),
             },
             'summary': _complete_summary(_raw_from_group(summary_row), targets),
             'data_completeness': _completeness_from_group(completeness_row),
@@ -712,6 +721,40 @@ def _all_time_months(transactions, earliest, latest, targets):
         else:
             month += 1
     return months
+
+
+def range_report(start, end, targets):
+    exclusive_end = end + date.resolution if end < date.max else None
+    transactions = _period_data(start, exclusive_end)
+    report = _report(start, exclusive_end, targets, transactions, ranked=True)
+    report['period'] = {'start_date': start.isoformat(), 'end_date': end.isoformat()}
+    report['drilldown'] = {'scope': 'range', **report['period']}
+    if (end - start).days < 30:
+        summaries = {
+            (row['_year'], row['_month'], row['_day']): row
+            for row in _grouped_values(transactions, 'day')
+        }
+        completeness = {
+            (row['_year'], row['_month'], row['_day']): row
+            for row in _period_map_rows(transactions, 'day')
+        }
+        periods = []
+        for offset in range((end - start).days + 1):
+            current = start + timedelta(days=offset)
+            key = (current.year, current.month, current.day)
+            status = completeness.get(key, {})
+            periods.append({
+                'period': {'year': current.year, 'month': current.month, 'label': current.isoformat()},
+                'summary': _complete_summary(_raw_from_group(summaries.get(key, {})), targets),
+                'data_completeness': _completeness_from_group(status),
+                'ledger_transaction_count': status.get('ledger_count', 0),
+            })
+        report['trend_granularity'] = 'day'
+    else:
+        periods = _all_time_months(transactions, start, end, targets)
+        report['trend_granularity'] = 'month'
+    report['trend_series'] = _trend_series(periods, targets)
+    return report
 
 
 def category_trend(subcategory_id, scope, targets, year=None, month=None):

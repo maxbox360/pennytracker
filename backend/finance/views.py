@@ -62,6 +62,7 @@ from .accounting import (
     drilldown_queryset,
     monthly_bounds,
     monthly_report,
+    range_report,
     serialize_drilldown_row,
     year_bounds,
     year_report,
@@ -134,6 +135,31 @@ def yearly_report_view(request):
     return Response(result)
 
 
+def range_bounds(request):
+    dates = []
+    for field in ('start_date', 'end_date'):
+        value = request.query_params.get(field, '')
+        try:
+            parsed = date.fromisoformat(value) if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value) else None
+        except ValueError:
+            parsed = None
+        if parsed is None:
+            raise ValidationError({field: 'Provide a valid date in YYYY-MM-DD format.'})
+        dates.append(parsed)
+    if dates[0] > dates[1]:
+        raise ValidationError({'period': 'From date must be on or before To date.'})
+    return dates
+
+
+@api_view(['GET'])
+def range_report_view(request):
+    start, end = range_bounds(request)
+    result = range_report(start, end, BudgetTargetSettings.objects.get(pk=1))
+    for key in ('_start', '_end'):
+        result.pop(key, None)
+    return Response(result)
+
+
 def historical_drilldown(request, scope):
     if scope == 'month':
         year, month = report_period(request)
@@ -144,6 +170,9 @@ def historical_drilldown(request, scope):
         if not year_value or not year_value.isdecimal() or not 1 <= int(year_value) <= 9998:
             raise ValidationError({'year': 'Choose a valid calendar year.'})
         start, end = year_bounds(int(year_value))
+    elif scope == 'range':
+        start, last = range_bounds(request)
+        end = last + date.resolution if last < date.max else None
     else:
         start = end = None
 
@@ -187,8 +216,8 @@ def historical_drilldown(request, scope):
 @api_view(['GET'])
 def historical_report_drilldown(request):
     scope = request.query_params.get('scope', '')
-    if scope not in ('all', 'year', 'month'):
-        raise ValidationError({'scope': 'Choose all, year, or month.'})
+    if scope not in ('all', 'year', 'month', 'range'):
+        raise ValidationError({'scope': 'Choose all, year, month, or range.'})
     return historical_drilldown(request, scope)
 
 

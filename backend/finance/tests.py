@@ -25,6 +25,7 @@ from .accounting import (
     drilldown_queryset,
     drilldown_rows,
     monthly_report,
+    range_report,
     year_report,
 )
 from .csv_imports import (
@@ -2520,6 +2521,150 @@ class MonthlyAccountingTests(APITestCase):
         self.create_transaction(amount='-90.00', subcategory=self.needs, month=2)
         report = year_report(2026, BudgetTargetSettings.objects.get(pk=1))
         self.assertEqual(report['summary']['needs']['actual_percent'], '14.00')
+
+    def test_range_inclusive_boundaries_and_daily_trends_use_transaction_date(self):
+        self.create_transaction(classification='INCOME', amount='1.00', year=2025, month=12, day=30)
+        self.create_transaction(classification='INCOME', amount='10.00', year=2025, month=12, day=31, posted_date=date(2026, 2, 1))
+        self.create_transaction(classification='INCOME', amount='20.00', year=2026, month=1, day=1, posted_date=date(2025, 12, 1))
+        self.create_transaction(classification='INCOME', amount='100.00', year=2026, month=1, day=2)
+        response = self.client.get('/api/reports/range/', {'start_date': '2025-12-31', 'end_date': '2026-01-01'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['period'], {'start_date': '2025-12-31', 'end_date': '2026-01-01'})
+        self.assertEqual(response.data['drilldown'], {'scope': 'range', **response.data['period']})
+        self.assertEqual(response.data['summary']['income']['amount'], '30.00')
+        self.assertEqual(response.data['ledger_transaction_count'], 2)
+        self.assertEqual(response.data['trend_granularity'], 'day')
+        self.assertEqual([(point['label'], point['income']) for point in response.data['trend_series']], [
+            ('2025-12-31', '10.00'), ('2026-01-01', '20.00'),
+        ])
+        same_day = self.client.get('/api/reports/range/', {'start_date': '2026-01-01', 'end_date': '2026-01-01'})
+        self.assertEqual(same_day.data['summary']['income']['amount'], '20.00')
+        self.assertEqual(len(same_day.data['trend_series']), 1)
+        cross_month = self.client.get('/api/reports/range/', {'start_date': '2025-12-30', 'end_date': '2026-01-02'})
+        self.assertEqual(cross_month.data['summary']['income']['amount'], '131.00')
+
+    def test_range_accounting_reconciles_with_existing_reports_and_drilldowns(self):
+        self.create_transaction(classification='INCOME', amount='100.00', month=1)
+        self.create_transaction(classification='INCOME', amount='900.00', month=2)
+        self.create_transaction(amount='-50.00', subcategory=self.needs, month=1)
+        self.create_transaction(amount='-90.00', subcategory=self.needs, month=2)
+        self.create_transaction(classification='REFUND', amount='10.00', subcategory=self.needs, month=2)
+        self.create_transaction(amount='-70.00', subcategory=self.wants, month=2)
+        self.create_transaction(classification='REFUND', amount='20.00', subcategory=self.wants, month=2)
+        self.create_transaction(classification='TRANSFER', amount='-100.00', subcategory=self.savings, savings_effect=SavingsEffect.CONTRIBUTION, month=2)
+        self.create_transaction(classification='TRANSFER', amount='25.00', subcategory=self.savings, savings_effect=SavingsEffect.WITHDRAWAL, month=2)
+        self.create_transaction(classification='OTHER_INFLOW', amount='125.00', subcategory=self.other_inflow, month=2)
+        targets = BudgetTargetSettings.objects.get(pk=1)
+        targets.needs_percent = Decimal('42.50')
+        targets.save()
+        month = range_report(date(2026, 2, 1), date(2026, 2, 28), targets)
+        year = range_report(date(2026, 1, 1), date(2026, 12, 31), targets)
+        entire = range_report(date(2026, 1, 15), date(2026, 2, 15), targets)
+        for actual, expected in ((month, monthly_report(2026, 2, targets)), (year, year_report(2026, targets)), (entire, all_time_report(targets))):
+            for key in ('summary', 'data_completeness', 'breakdown', 'other_inflows_breakdown'):
+                self.assertEqual(actual[key], expected[key], key)
+        self.assertEqual(year['summary']['needs']['actual_percent'], '13.00')
+        self.assertEqual(year['summary']['needs']['target_percent'], '42.50')
+        self.assertEqual(year['summary']['needs']['variance_points'], '-29.50')
+        self.assertEqual(year['summary']['wants']['amount'], '50.00')
+        self.assertEqual(year['summary']['savings_contributions']['amount'], '100.00')
+        self.assertEqual(year['summary']['savings_withdrawals']['amount'], '25.00')
+        self.assertEqual(year['summary']['net_savings_activity']['amount'], '75.00')
+        self.assertEqual(year['summary']['other_inflows']['amount'], '125.00')
+        self.assertEqual(year['summary']['remaining']['amount'], '720.00')
+        self.assertEqual(year['trend_granularity'], 'month')
+        self.assertFalse(year['trend_series'][2]['has_transactions'])
+        for metric, value in year['summary'].items():
+            response = self.client.get('/api/reports/drilldown/', {
+                'scope': 'range', 'start_date': '2026-01-01', 'end_date': '2026-12-31', 'metric': metric,
+            })
+            self.assertEqual(response.status_code, 200, metric)
+            self.assertEqual(sum((Decimal(row['contribution']) for row in response.data['results']), Decimal('0')), Decimal(value['amount']), metric)
+        response = self.client.get('/api/reports/drilldown/', {
+            'scope': 'range', 'start_date': '2026-01-01', 'end_date': '2026-12-31',
+            'metric': 'needs', 'subcategory': self.needs.pk,
+        })
+        self.assertEqual(sum(Decimal(row['contribution']) for row in response.data['results']), Decimal('130.00'))
+
+    def test_range_completeness_duplicates_and_reviewed_transfer(self):
+        self.create_transaction(classification='UNKNOWN', month=2, day=1)
+        self.create_transaction(classification='EXPENSE', month=2, day=2)
+        self.create_transaction(classification='REFUND', amount='5.00', month=2, day=2)
+        self.create_transaction(classification='EXPENSE', categorization_rule_conflict=True, month=2, day=3)
+        candidate = self.create_transaction(classification='EXPENSE', subcategory=self.needs, month=2, day=4)
+        possible = self.create_transaction(classification='EXPENSE', subcategory=self.needs, month=2, day=5)
+        possible.duplicate_candidates.add(candidate)
+        possible.duplicate_resolution = DuplicateResolution.UNRESOLVED
+        possible.save()
+        confirmed = self.create_transaction(classification='EXPENSE', subcategory=self.needs, month=2, day=6)
+        confirmed.duplicate_candidates.add(candidate)
+        confirmed.duplicate_resolution = DuplicateResolution.CONFIRMED_DUPLICATE
+        confirmed.duplicate_of = candidate
+        confirmed.save()
+        transfer = self.create_transaction(classification='TRANSFER', month=2, day=7)
+        transfer.mark_reviewed()
+        report = self.client.get('/api/reports/range/', {'start_date': '2026-02-01', 'end_date': '2026-02-08'}).data
+        self.assertEqual(report['data_completeness']['affected_transaction_count'], 5)
+        self.assertEqual(set(report['data_completeness']['blockers']), {'UNKNOWN', 'UNCATEGORIZED', 'RULE_CONFLICT', 'UNRESOLVED_DUPLICATE'})
+        self.assertEqual(report['data_completeness']['blockers']['UNCATEGORIZED']['transaction_count'], 3)
+        self.assertEqual(report['data_completeness']['excluded']['confirmed_duplicate'], 1)
+        self.assertEqual(report['summary']['needs']['amount'], '10.00')
+        self.assertTrue(report['trend_series'][0]['is_incomplete'])
+        self.assertFalse(report['trend_series'][7]['has_transactions'])
+        self.assertFalse(report['trend_series'][7]['is_incomplete'])
+
+    def test_range_empty_negative_and_validation(self):
+        params = {'start_date': '2026-02-01', 'end_date': '2026-02-01'}
+        empty = self.client.get('/api/reports/range/', params).data
+        self.assertEqual(empty['ledger_transaction_count'], 0)
+        self.assertFalse(empty['data_completeness']['is_incomplete'])
+        self.assertIsNone(empty['summary']['needs']['actual_percent'])
+        self.assertFalse(empty['trend_series'][0]['has_transactions'])
+        self.create_transaction(classification='REFUND', amount='25.00', subcategory=self.wants, month=2, day=1)
+        negative = self.client.get('/api/reports/range/', params).data
+        self.assertEqual(negative['summary']['wants']['amount'], '-25.00')
+        self.assertEqual(negative['summary']['remaining']['amount'], '25.00')
+        self.assertIsNone(negative['summary']['wants']['actual_percent'])
+        for invalid in (
+            {}, {'start_date': '2026-02-01'}, {'start_date': '2026-02-30', 'end_date': '2026-03-01'},
+            {'start_date': '2026-2-01', 'end_date': '2026-03-01'},
+            {'start_date': '2026-03-01', 'end_date': '2026-02-01'},
+        ):
+            self.assertEqual(self.client.get('/api/reports/range/', invalid).status_code, 400)
+            self.assertEqual(self.client.get('/api/reports/drilldown/', {'scope': 'range', 'metric': 'income', **invalid}).status_code, 400)
+        maximum = self.client.get('/api/reports/range/', {'start_date': '9999-12-31', 'end_date': '9999-12-31'})
+        self.assertEqual(maximum.status_code, 200)
+        maximum_month = self.client.get('/api/reports/range/', {'start_date': '9999-11-01', 'end_date': '9999-12-31'})
+        self.assertEqual(maximum_month.status_code, 200)
+        self.assertEqual(maximum_month.data['trend_series'][-1]['label'], '9999-12')
+
+    def test_range_monthly_trends_clip_edge_months_and_mark_partial_periods(self):
+        self.create_transaction(classification='INCOME', amount='100.00', month=1, day=1)
+        self.create_transaction(classification='INCOME', amount='10.00', month=1, day=20)
+        self.create_transaction(classification='UNKNOWN', month=2, day=1)
+        self.create_transaction(classification='INCOME', amount='20.00', month=3, day=10)
+        self.create_transaction(classification='INCOME', amount='200.00', month=3, day=20)
+        result = self.client.get('/api/reports/range/', {
+            'start_date': '2026-01-15', 'end_date': '2026-03-15',
+        }).data
+        self.assertEqual(result['trend_granularity'], 'month')
+        self.assertEqual([point['income'] for point in result['trend_series']], ['10.00', '0.00', '20.00'])
+        self.assertTrue(result['trend_series'][1]['has_transactions'])
+        self.assertTrue(result['trend_series'][1]['is_incomplete'])
+        self.assertEqual(result['summary']['income']['amount'], '30.00')
+
+    def test_range_drilldown_is_paginated_and_inclusive(self):
+        for day in (1, 2):
+            for _ in range(51):
+                self.create_transaction(classification='INCOME', amount='1.00', month=2, day=day)
+        self.create_transaction(classification='INCOME', amount='999.00', month=2, day=3)
+        params = {'scope': 'range', 'start_date': '2026-02-01', 'end_date': '2026-02-02', 'metric': 'income'}
+        first = self.client.get('/api/reports/drilldown/', params).data
+        second = self.client.get('/api/reports/drilldown/', {**params, 'page': first['next']}).data
+        self.assertEqual(first['count'], 102)
+        self.assertEqual(len(first['results']), 100)
+        self.assertEqual(len(second['results']), 2)
+        self.assertEqual(sum(Decimal(row['contribution']) for row in first['results'] + second['results']), Decimal('102.00'))
 
     def test_historical_completeness_propagates_and_distinguishes_empty_months(self):
         self.create_transaction(classification='UNKNOWN', month=2)

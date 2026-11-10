@@ -44,7 +44,7 @@ type Transaction = {
   notes: string
 }
 
-type Props = { mode: 'transactions' | 'review'; reload: number; initialReason?: string }
+type Props = { mode: 'transactions' | 'review'; reload: number; initialReason?: string; initialStartDate?: string; initialEndDate?: string }
 type Draft = {
   classification: Classification
   savings_effect: SavingsEffect
@@ -117,7 +117,7 @@ function acceptsSubcategory(classification: Classification, subcategory: Subcate
       && acceptsBucket(classification, subcategory.budget_bucket)
 }
 
-export default function TransactionTable({ mode, reload, initialReason = '' }: Props) {
+export default function TransactionTable({ mode, reload, initialReason = '', initialStartDate = '', initialEndDate = '' }: Props) {
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [totalCount, setTotalCount] = useState(0)
   const [hasPreviousPage, setHasPreviousPage] = useState(false)
@@ -143,8 +143,8 @@ export default function TransactionTable({ mode, reload, initialReason = '' }: P
     mode === 'review' ? 'PENDING' : '',
   )
   const [reasonFilter, setReasonFilter] = useState(initialReason)
-  const [startDate, setStartDate] = useState('')
-  const [endDate, setEndDate] = useState('')
+  const [startDate, setStartDate] = useState(initialStartDate)
+  const [endDate, setEndDate] = useState(initialEndDate)
   const [search, setSearch] = useState('')
   const [editingId, setEditingId] = useState<number | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)

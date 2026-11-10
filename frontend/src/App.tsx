@@ -96,6 +96,8 @@ function apiErrorMessage(result: unknown, status: number): string {
 function App() {
   const [reload, setReload] = useState(0)
   const [reviewReason, setReviewReason] = useState('')
+  const [reviewDates, setReviewDates] = useState({ start: '', end: '' })
+  const [reportsVisited, setReportsVisited] = useState(false)
   const [view, setView] = useState<'transactions' | 'review' | 'categories' | 'rules' | 'reports'>('transactions')
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem('pennytracker-theme')
@@ -202,7 +204,7 @@ function App() {
             className={`nav-item ${view === 'review' ? 'nav-item--active' : ''}`}
             type="button"
             aria-current={view === 'review' ? 'page' : undefined}
-            onClick={() => { setReviewReason(''); setView('review') }}
+            onClick={() => { setReviewReason(''); setReviewDates({ start: '', end: '' }); setView('review') }}
           >
             Review
           </button>
@@ -226,7 +228,11 @@ function App() {
             className={`nav-item ${view === 'reports' ? 'nav-item--active' : ''}`}
             type="button"
             aria-current={view === 'reports' ? 'page' : undefined}
-            onClick={() => setView('reports')}
+            onClick={() => {
+              if (view !== 'reports') setReload((current) => current + 1)
+              setReportsVisited(true)
+              setView('reports')
+            }}
           >
             Reports
           </button>
@@ -464,15 +470,25 @@ function App() {
           </section>
         )}
 
+        {reportsVisited && <div hidden={view !== 'reports'}>
+          <Reports reload={reload} onReview={(reason, start, end) => {
+            setReviewReason(reason)
+            setReviewDates({ start, end })
+            setView('review')
+          }} />
+        </div>}
         {view === 'reports'
-          ? <Reports reload={reload} onReview={(reason) => { setReviewReason(reason); setView('review') }} />
+          ? null
           : view === 'categories'
           ? <Categories />
           : view === 'rules'
             ? <Rules reload={reload} onChanged={() => setReload((current) => current + 1)} />
             : previewing
               ? null
-              : <TransactionTable key={`${view}-${reviewReason}`} mode={view} reload={reload} initialReason={view === 'review' ? reviewReason : ''} />}
+              : <TransactionTable key={`${view}-${reviewReason}-${reviewDates.start}-${reviewDates.end}`} mode={view} reload={reload}
+                  initialReason={view === 'review' ? reviewReason : ''}
+                  initialStartDate={view === 'review' ? reviewDates.start : ''}
+                  initialEndDate={view === 'review' ? reviewDates.end : ''} />}
       </main>
     </div>
   )
