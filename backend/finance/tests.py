@@ -2076,6 +2076,41 @@ class MonthlyAccountingTests(APITestCase):
     def report(self, month=10):
         return monthly_report(2026, month, BudgetTargetSettings.objects.get(pk=1))
 
+    def test_remaining_percentage_uses_income_and_preserves_partial_and_signed_values(self):
+        def summary():
+            return self.client.get('/api/reports/monthly/?year=2026&month=10').data
+
+        self.assertIsNone(summary()['summary']['remaining']['actual_percent'])
+        self.create_transaction(classification='INCOME', amount='1000.00')
+        self.create_transaction(amount='-300.00', subcategory=self.needs)
+        self.create_transaction(amount='-200.00', subcategory=self.wants)
+        self.create_transaction(
+            classification='TRANSFER', amount='-100.00', subcategory=self.savings,
+            savings_effect=SavingsEffect.CONTRIBUTION,
+        )
+        self.create_transaction(
+            classification='TRANSFER', amount='50.00', subcategory=self.savings,
+            savings_effect=SavingsEffect.WITHDRAWAL,
+        )
+        self.create_transaction(classification='OTHER_INFLOW', amount='150.00', subcategory=self.other_inflow)
+        report = summary()
+        self.assertEqual(report['summary']['remaining'], {'amount': '400.00', 'actual_percent': '40.00'})
+        self.assertFalse(report['data_completeness']['is_incomplete'])
+
+        self.create_transaction(classification='UNKNOWN', amount='99.00')
+        report = summary()
+        self.assertTrue(report['data_completeness']['is_incomplete'])
+        self.assertEqual(report['summary']['remaining']['actual_percent'], '40.00')
+
+        self.create_transaction(amount='-600.00', subcategory=self.needs)
+        report = summary()
+        self.assertEqual(report['summary']['remaining'], {'amount': '-200.00', 'actual_percent': '-20.00'})
+
+        self.create_transaction(classification='REFUND', amount='250.00', subcategory=self.wants)
+        report = summary()
+        self.assertEqual(report['summary']['wants']['actual_percent'], '-5.00')
+        self.assertEqual(report['summary']['remaining'], {'amount': '50.00', 'actual_percent': '5.00'})
+
     def test_monthly_report_defaults_to_latest_transaction_month_or_today(self):
         response = self.client.get('/api/reports/monthly/')
         self.assertEqual(response.status_code, 200)
@@ -2168,6 +2203,7 @@ class MonthlyAccountingTests(APITestCase):
         self.assertEqual(summary['wants']['amount'], '150.00')
         self.assertEqual(summary['wants']['actual_percent'], '2.42')
         self.assertEqual(summary['remaining']['amount'], '6050.00')
+        self.assertEqual(summary['remaining']['actual_percent'], '97.58')
         self.assertEqual(
             {row['subcategory_name']: row['amount'] for row in report['other_inflows_breakdown']},
             {'Gambling Winnings': '125.00', 'Gifts': '45.00', 'Uncategorized': '30.00'},
@@ -2253,6 +2289,7 @@ class MonthlyAccountingTests(APITestCase):
         self.assertEqual(report['summary']['savings_withdrawals']['amount'], '100.00')
         self.assertEqual(report['summary']['net_savings_activity']['amount'], '400.00')
         self.assertEqual(report['summary']['remaining']['amount'], '50.00')
+        self.assertEqual(report['summary']['remaining']['actual_percent'], '8.33')
         self.assertEqual(report['breakdown']['SAVINGS'][0]['amount'], '400.00')
         contribution_rows = drilldown_rows(report, 'savings_contributions')
         withdrawal_rows = drilldown_rows(report, 'savings_withdrawals')
@@ -2418,6 +2455,7 @@ class MonthlyAccountingTests(APITestCase):
         self.assertIsNone(report['summary']['needs']['actual_percent'])
         self.assertIsNone(report['summary']['needs']['variance_points'])
         self.assertEqual(report['summary']['remaining']['amount'], '-10.00')
+        self.assertIsNone(report['summary']['remaining']['actual_percent'])
 
     def test_year_month_all_time_summaries_and_drilldowns_reconcile(self):
         self.create_transaction(classification='INCOME', amount='1000.00', year=2025, month=12)
