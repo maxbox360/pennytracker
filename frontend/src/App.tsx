@@ -241,6 +241,7 @@ function App() {
             className={`nav-item ${view === 'accounts' ? 'nav-item--active' : ''}`}
             type="button"
             aria-current={view === 'accounts' ? 'page' : undefined}
+            disabled={importing}
             onClick={() => { closeImport(); setView('accounts') }}
           >
             Accounts
