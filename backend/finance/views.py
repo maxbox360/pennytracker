@@ -1,7 +1,15 @@
+import csv
+import io
 import re
+import sqlite3
+import tempfile
 from datetime import date
+from decimal import Decimal
+from pathlib import Path
+from django.conf import settings
 from django.core.paginator import Paginator
 from django.db.models import Max
+from django.http import HttpResponse
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
@@ -41,8 +49,11 @@ from .models import (
     BudgetBucket,
     BudgetTargetSettings,
     CategorizationRule,
+    Debt,
+    DebtBalanceSnapshot,
     DuplicateResolution,
     ImportBatch,
+    RecurringExpense,
     ReviewStatus,
     SavingsEffect,
     Subcategory,
@@ -54,7 +65,10 @@ from .serializers import (
     AccountSerializer,
     BudgetTargetSettingsSerializer,
     CategorizationRuleSerializer,
+    DebtBalanceSnapshotSerializer,
+    DebtSerializer,
     ImportBatchSerializer,
+    RecurringExpenseSerializer,
     SubcategorySerializer,
     TransactionSerializer,
 )
@@ -74,6 +88,97 @@ from .accounting import (
 class AccountViewSet(ModelViewSet):
     queryset = Account.objects.all()
     serializer_class = AccountSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        account = self.get_object()
+        if account.transactions.exists() or account.import_batches.exists():
+            return Response(
+                {'detail': 'Accounts with imported transactions or batches cannot be deleted; mark the account inactive instead.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+
+class DebtViewSet(ModelViewSet):
+    queryset = Debt.objects.prefetch_related('snapshots')
+    serializer_class = DebtSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        active = self.request.query_params.get('is_active')
+        if active in ('true', 'false'):
+            queryset = queryset.filter(is_active=active == 'true')
+        return queryset
+
+    @action(detail=True, methods=['post'], url_path='snapshots')
+    def add_snapshot(self, request, pk=None):
+        debt = self.get_object()
+        serializer = DebtBalanceSnapshotSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            serializer.save(debt=debt)
+            if debt.original_balance is None:
+                debt.original_balance = serializer.validated_data['balance']
+                debt.save(update_fields=('original_balance', 'updated_at'))
+        debt.refresh_from_db()
+        return Response(DebtSerializer(debt).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['delete'], url_path=r'snapshots/(?P<snapshot_id>\d+)')
+    def remove_snapshot(self, request, pk=None, snapshot_id=None):
+        debt = self.get_object()
+        snapshot = debt.snapshots.filter(pk=snapshot_id).first()
+        if snapshot is None:
+            return Response({'detail': 'Balance snapshot not found.'}, status=status.HTTP_404_NOT_FOUND)
+        snapshot.delete()
+        debt.refresh_from_db()
+        return Response(DebtSerializer(debt).data)
+
+
+class RecurringExpenseViewSet(ModelViewSet):
+    queryset = RecurringExpense.objects.select_related('subcategory')
+    serializer_class = RecurringExpenseSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        active = self.request.query_params.get('is_active')
+        if active in ('true', 'false'):
+            queryset = queryset.filter(is_active=active == 'true')
+        kind = self.request.query_params.get('kind')
+        if kind:
+            if kind not in RecurringExpense.Kind.values:
+                raise ValidationError({'kind': 'Choose a valid recurring expense kind.'})
+            queryset = queryset.filter(kind=kind)
+        return queryset
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        from .serializers import _quantize_money
+        active_items = list(
+            RecurringExpense.objects.filter(is_active=True).select_related('subcategory')
+        )
+        monthly_bills = sum(
+            (item.amount for item in active_items if item.kind == RecurringExpense.Kind.BILL),
+            Decimal('0.00'),
+        )
+        monthly_subscriptions = sum(
+            (item.amount for item in active_items if item.kind == RecurringExpense.Kind.MONTHLY_SUBSCRIPTION),
+            Decimal('0.00'),
+        )
+        annual_subscriptions = sum(
+            (item.amount for item in active_items if item.kind == RecurringExpense.Kind.ANNUAL_SUBSCRIPTION),
+            Decimal('0.00'),
+        )
+        effective_monthly_total = monthly_bills + monthly_subscriptions + (annual_subscriptions / Decimal('12'))
+        effective_annual_total = (monthly_bills + monthly_subscriptions) * Decimal('12') + annual_subscriptions
+        return Response({
+            'active_count': len(active_items),
+            'monthly_bills_total': _quantize_money(monthly_bills),
+            'monthly_subscriptions_total': _quantize_money(monthly_subscriptions),
+            'annual_subscriptions_total': _quantize_money(annual_subscriptions),
+            'effective_monthly_total': _quantize_money(effective_monthly_total),
+            'effective_annual_total': _quantize_money(effective_annual_total),
+        })
+
 
 
 @api_view(['GET', 'PUT'])
@@ -666,6 +771,51 @@ class TransactionViewSet(ModelViewSet):
         tie_breaker = '-id' if descending else 'id'
         return queryset.order_by(order_expression, tie_breaker)
 
+    @action(detail=False, methods=['get'], url_path='export-csv')
+    def export_csv(self, request):
+        queryset = self.get_queryset()
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            'id',
+            'date',
+            'posted_date',
+            'account',
+            'raw_description',
+            'merchant',
+            'amount',
+            'source_type',
+            'classification',
+            'savings_effect',
+            'subcategory',
+            'budget_bucket',
+            'review_status',
+            'duplicate_resolution',
+            'notes',
+        ])
+        for item in queryset.iterator(chunk_size=1000):
+            writer.writerow([
+                item.id,
+                item.date.isoformat(),
+                item.posted_date.isoformat() if item.posted_date else '',
+                item.account.name,
+                item.raw_description,
+                item.merchant,
+                format(item.amount, '.2f'),
+                item.source_type,
+                item.classification,
+                item.savings_effect,
+                item.subcategory.name if item.subcategory else '',
+                item.budget_bucket,
+                item.review_status,
+                item.duplicate_resolution,
+                item.notes,
+            ])
+        response = HttpResponse(buffer.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="pennytracker-transactions-{date.today().isoformat()}.csv"'
+        return response
+
+
     @action(detail=True, methods=['post'], url_path='mark-reviewed')
     def mark_reviewed(self, request, pk=None):
         transaction_record = self.get_object()
@@ -799,9 +949,55 @@ class TransactionViewSet(ModelViewSet):
                         })
                     for record in records:
                         record.mark_reviewed()
+                elif operation == 'merchant':
+                    merchant = request.data.get('merchant')
+                    if not isinstance(merchant, str):
+                        raise ValidationError({'merchant': 'Provide a merchant string.'})
+                    merchant = merchant.strip()
+                    if len(merchant) > 200:
+                        raise ValidationError({'merchant': 'Merchant must be 200 characters or fewer.'})
+                    for record in records:
+                        record.merchant = merchant
+                        record.save(update_fields=('merchant', 'updated_at'))
+                elif operation == 'savings_effect':
+                    savings_effect = request.data.get('savings_effect', SavingsEffect.NONE)
+                    subcategory_id = request.data.get('subcategory')
+                    if savings_effect not in SavingsEffect.values:
+                        raise ValidationError({'savings_effect': 'Choose a valid Savings effect.'})
+                    subcategory = None
+                    if savings_effect != SavingsEffect.NONE:
+                        if not str(subcategory_id or '').isdecimal():
+                            raise ValidationError({'subcategory': 'Select an active Savings subcategory.'})
+                        subcategory = Subcategory.objects.filter(
+                            pk=subcategory_id,
+                            is_active=True,
+                            scope=SubcategoryScope.BUDGET,
+                            budget_bucket=BudgetBucket.SAVINGS,
+                        ).first()
+                        if subcategory is None:
+                            raise ValidationError({'subcategory': 'Select an active Savings subcategory.'})
+                    for record in records:
+                        record.classification = TransactionClassification.TRANSFER
+                        record.savings_effect = savings_effect
+                        record.subcategory = subcategory
+                        record.budget_bucket = BudgetBucket.SAVINGS if subcategory else ''
+                        record.categorized_by_rule = None
+                        record.save(update_fields=(
+                            'classification',
+                            'savings_effect',
+                            'subcategory',
+                            'budget_bucket',
+                            'categorized_by_rule',
+                            'review_status',
+                            'updated_at',
+                        ))
+                        record.reconcile_financial_resolution()
+                        record.save(update_fields=(
+                            'manually_resolved', 'categorization_rule_conflict', 'updated_at',
+                        ))
                 else:
                     raise ValidationError({
-                        'operation': 'Use classification, subcategory, or mark_reviewed.'
+                        'operation': 'Use classification, subcategory, mark_reviewed, merchant, or savings_effect.'
                     })
         except DjangoValidationError as error:
             return Response({'detail': error.message_dict}, status=status.HTTP_400_BAD_REQUEST)
@@ -960,3 +1156,22 @@ def confirm_import(request):
         'earliest_transaction_date': batch.earliest_transaction_date.isoformat(),
         'latest_transaction_date': batch.latest_transaction_date.isoformat(),
     }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+def database_backup_view(request):
+    from django.db import connection
+    connection.ensure_connection()
+    raw_conn = connection.connection
+    sql_dump = '\n'.join(raw_conn.iterdump())
+    with tempfile.NamedTemporaryFile(suffix='.sqlite3') as tmp:
+        dst = sqlite3.connect(tmp.name)
+        try:
+            dst.executescript(sql_dump)
+        finally:
+            dst.close()
+        data = Path(tmp.name).read_bytes()
+    response = HttpResponse(data, content_type='application/x-sqlite3')
+    response['Content-Disposition'] = f'attachment; filename="pennytracker-backup-{date.today().isoformat()}.sqlite3"'
+    return response
+

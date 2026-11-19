@@ -109,6 +109,44 @@ const bucketLabels: Record<Bucket, string> = {
   SAVINGS: 'Savings',
 }
 
+function RuleOutcomeIcon({ classification, bucket }: { classification: Classification; bucket: Bucket | null }) {
+  if (bucket === 'NEEDS') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M3 10.5L12 3l9 7.5v9.5a1 1 0 0 1-1 1h-5.5v-6h-5v6H4a1 1 0 0 1-1-1v-9.5z" fill="currentColor" fillOpacity="0.2" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  if (bucket === 'WANTS') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 2.5l2.6 5.4 5.9.85-4.25 4.15 1 5.85L12 16l-5.25 2.75 1-5.85-4.25-4.15 5.9-.85L12 2.5z" fill="currentColor" fillOpacity="0.2" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  if (bucket === 'SAVINGS' || classification === 'TRANSFER') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 2.5L4 6v5.8c0 5.1 3.4 9.8 8 11.2 4.6-1.4 8-6.1 8-11.2V6l-8-3.5z" fill="currentColor" fillOpacity="0.2" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+        <path d="M9 12l2 2 4-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  if (classification === 'INCOME' || classification === 'OTHER_INFLOW' || classification === 'REFUND') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="currentColor" fillOpacity="0.16" stroke="currentColor" strokeWidth="1.75" />
+        <path d="M12 8v8M8.5 12.5L12 16l3.5-3.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M13 2L4 14h7l-1 8 10-12h-7l0-8z" fill="currentColor" fillOpacity="0.2" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 function normalizedRuleValue(value: string) {
   return value.replace(/\s+/g, ' ').trim()
 }
@@ -293,6 +331,12 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
     : null
   const canSubcategorize = draft.classification !== 'INCOME' && draft.classification !== 'EXCLUDED'
     && (draft.classification !== 'TRANSFER' || draft.savings_effect !== 'NONE')
+  const activeRulesCount = rules.filter((r) => r.is_active && ruleUsable(r)).length
+  const expenseRulesCount = rules.filter((r) => r.classification === 'EXPENSE' || r.classification === 'REFUND').length
+  const transferRulesCount = rules.filter((r) => r.classification === 'TRANSFER').length
+  const incomeOtherRulesCount = rules.filter(
+    (r) => r.classification === 'INCOME' || r.classification === 'OTHER_INFLOW' || r.classification === 'EXCLUDED',
+  ).length
 
   return (
     <section className="rules-panel" aria-labelledby="rules-heading">
@@ -307,6 +351,60 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
         </div>
         <button className="primary-button" type="button" onClick={() => beginEdit()}>Create rule</button>
       </header>
+
+      <div className="kpi-strip">
+        <div className="kpi-card kpi-card--accent">
+          <div className="kpi-card-header">
+            <span className="kpi-label">Active Rules</span>
+            <span className="kpi-icon-badge" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M13 2L4 14h7l-1 8 10-12h-7l0-8z" fill="currentColor" fillOpacity="0.2" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+              </svg>
+            </span>
+          </div>
+          <strong className="kpi-value">{activeRulesCount}</strong>
+          <span className="kpi-sub">{rules.length} total configured</span>
+        </div>
+        <div className="kpi-card kpi-card--Needs">
+          <div className="kpi-card-header">
+            <span className="kpi-label">Expense Rules</span>
+            <span className="kpi-icon-badge" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <rect x="2.5" y="5" width="19" height="14" rx="2.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.75" />
+                <path d="M2.5 9.5h19M6.5 14.5h4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+              </svg>
+            </span>
+          </div>
+          <strong className="kpi-value">{expenseRulesCount}</strong>
+          <span className="kpi-sub">Expenses &amp; refunds</span>
+        </div>
+        <div className="kpi-card kpi-card--Savings">
+          <div className="kpi-card-header">
+            <span className="kpi-label">Transfer / Savings Rules</span>
+            <span className="kpi-icon-badge" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M12 2.5L4 6v5.8c0 5.1 3.4 9.8 8 11.2 4.6-1.4 8-6.1 8-11.2V6l-8-3.5z" fill="currentColor" fillOpacity="0.2" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+                <path d="M9 12l2 2 4-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+          </div>
+          <strong className="kpi-value">{transferRulesCount}</strong>
+          <span className="kpi-sub">Transfers &amp; savings flows</span>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-card-header">
+            <span className="kpi-label">Income / Other Rules</span>
+            <span className="kpi-icon-badge" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="9" fill="currentColor" fillOpacity="0.16" stroke="currentColor" strokeWidth="1.75" />
+                <path d="M12 8v8M8.5 12.5L12 16l3.5-3.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+          </div>
+          <strong className="kpi-value">{incomeOtherRulesCount}</strong>
+          <span className="kpi-sub">Income, inflows &amp; excluded</span>
+        </div>
+      </div>
 
       {error && <p className="message message--error" role="alert">{error}</p>}
       {notice && <p className="table-notice" role="status">{notice}</p>}
@@ -442,15 +540,29 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
         <p className="message">No transaction rules yet.</p>
       ) : (
         <div className="rule-list">
-          {rules.map((rule) => (
-            <article className={`rule-row ${rule.is_active ? '' : 'rule-row--disabled'}`} key={rule.id}>
-              <div className="rule-condition">
-                <strong>
-                  Rule #{rule.id} · {rule.name || `Description ${matchLabels[rule.match_type]} “${rule.match_value}”`}
-                  {' '}<small>{classificationLabels[rule.classification]}{rule.savings_effect !== 'NONE' ? ` · Savings ${rule.savings_effect.toLowerCase()}` : ''}</small>
-                </strong>
-                <span>{ruleSentence(rule, rule.subcategory_name)}</span>
-              </div>
+          {rules.map((rule) => {
+            const badgeVariant = rule.subcategory_bucket
+              ? rule.subcategory_bucket
+              : rule.classification === 'TRANSFER'
+                ? 'SAVINGS'
+                : 'OTHER_INFLOW'
+            return (
+              <article className={`rule-row ${rule.is_active ? '' : 'rule-row--disabled'}`} key={rule.id}>
+                <div className="rule-condition" style={{ display: 'flex', alignItems: 'flex-start', gap: '11px' }}>
+                  <span
+                    className={`bucket-icon-badge bucket-icon-badge--${badgeVariant}`}
+                    aria-hidden="true"
+                  >
+                    <RuleOutcomeIcon classification={rule.classification} bucket={rule.subcategory_bucket} />
+                  </span>
+                  <div style={{ display: 'grid', gap: '3px' }}>
+                    <strong>
+                      Rule #{rule.id} · {rule.name || `Description ${matchLabels[rule.match_type]} “${rule.match_value}”`}
+                      {' '}<small>{classificationLabels[rule.classification]}{rule.savings_effect !== 'NONE' ? ` · Savings ${rule.savings_effect.toLowerCase()}` : ''}</small>
+                    </strong>
+                    <span>{ruleSentence(rule, rule.subcategory_name)}</span>
+                  </div>
+                </div>
               <div className="rule-target">
                 <span>{rule.subcategory_name ? `${rule.subcategory_name} · ${rule.subcategory_bucket ? bucketLabels[rule.subcategory_bucket] : 'Other Inflows'}` : 'No subcategory'}</span>
                 {!ruleUsable(rule) && (
@@ -484,7 +596,8 @@ export default function Rules({ reload, onChanged }: { reload: number; onChanged
                 <button type="button" className="quiet-button" onClick={() => void removeRule(rule)}>Remove</button>
               </div>
             </article>
-          ))}
+            )
+          })}
         </div>
       )}
     </section>

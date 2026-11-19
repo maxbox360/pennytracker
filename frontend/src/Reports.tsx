@@ -274,6 +274,235 @@ function CompletenessNotice({
   )
 }
 
+function clampPercent(value: string | null | undefined): number {
+  const numeric = Number(value || 0)
+  if (Number.isNaN(numeric)) return 0
+  return Math.min(100, Math.max(0, numeric))
+}
+
+function KpiRingGauge({
+  actualPercent,
+  targetPercent,
+  color,
+}: {
+  actualPercent: string | null
+  targetPercent: string
+  color: string
+}) {
+  const radius = 15
+  const circumference = 2 * Math.PI * radius
+  const actual = clampPercent(actualPercent)
+  const target = clampPercent(targetPercent)
+  const actualDash = (actual / 100) * circumference
+  const targetDash = (target / 100) * circumference
+
+  return (
+    <svg
+      className="kpi-ring-gauge"
+      width="38"
+      height="38"
+      viewBox="0 0 38 38"
+      aria-hidden="true"
+    >
+      <circle
+        className="kpi-ring-track"
+        cx="19"
+        cy="19"
+        r={radius}
+        strokeWidth="3.75"
+      />
+      <circle
+        className="kpi-ring-fill"
+        cx="19"
+        cy="19"
+        r={radius}
+        stroke={color}
+        strokeOpacity="0.24"
+        strokeWidth="3.75"
+        strokeDasharray={`${targetDash} ${circumference}`}
+        transform="rotate(-90 19 19)"
+      />
+      <circle
+        className="kpi-ring-fill"
+        cx="19"
+        cy="19"
+        r={radius}
+        stroke={color}
+        strokeWidth="3.75"
+        strokeDasharray={`${actualDash} ${circumference}`}
+        transform="rotate(-90 19 19)"
+      />
+      <text
+        className="kpi-ring-text"
+        x="19"
+        y="19"
+        textAnchor="middle"
+        dominantBaseline="central"
+      >
+        {actualPercent !== null ? `${Math.round(Number(actualPercent))}%` : '—'}
+      </text>
+    </svg>
+  )
+}
+
+function CashflowAllocationStrip({
+  summary,
+  openDrill,
+}: {
+  summary: Summary
+  openDrill: (metric: string, title: string) => void
+}) {
+  const incomeCents = amountInCents(summary.income.amount)
+  const needsCents = amountInCents(summary.needs.amount)
+  const wantsCents = amountInCents(summary.wants.amount)
+  const savingsCents = amountInCents(summary.savings_contributions.amount)
+  const remainingCents = amountInCents(summary.remaining.amount)
+
+  const posNeeds = needsCents > 0n ? needsCents : 0n
+  const posWants = wantsCents > 0n ? wantsCents : 0n
+  const posSavings = savingsCents > 0n ? savingsCents : 0n
+  const posRemaining = remainingCents > 0n ? remainingCents : 0n
+  const positiveSum = posNeeds + posWants + posSavings + posRemaining
+  const denominator = incomeCents > positiveSum ? incomeCents : positiveSum
+
+  const remainingPercent = incomeCents > 0n
+    ? ((Number(remainingCents) / Number(incomeCents)) * 100).toFixed(1)
+    : null
+
+  const segments = [
+    {
+      key: 'needs',
+      metric: 'needs',
+      label: metricLabels.needs,
+      amount: summary.needs.amount,
+      positiveCents: posNeeds,
+      actualPercent: summary.needs.actual_percent,
+      targetPercent: summary.needs.target_percent,
+      color: 'var(--chart-needs)',
+    },
+    {
+      key: 'wants',
+      metric: 'wants',
+      label: metricLabels.wants,
+      amount: summary.wants.amount,
+      positiveCents: posWants,
+      actualPercent: summary.wants.actual_percent,
+      targetPercent: summary.wants.target_percent,
+      color: 'var(--chart-wants)',
+    },
+    {
+      key: 'savings_contributions',
+      metric: 'savings_contributions',
+      label: metricLabels.savings_contributions,
+      amount: summary.savings_contributions.amount,
+      positiveCents: posSavings,
+      actualPercent: summary.savings_contributions.actual_percent,
+      targetPercent: summary.savings_contributions.target_percent,
+      color: 'var(--chart-savings)',
+    },
+    {
+      key: 'remaining',
+      metric: 'remaining',
+      label: metricLabels.remaining,
+      amount: summary.remaining.amount,
+      positiveCents: posRemaining,
+      actualPercent: remainingPercent,
+      targetPercent: null,
+      color: remainingCents < 0n ? 'var(--warning)' : 'var(--chart-remaining)',
+    },
+  ]
+
+  const insightText = summary.savings_contributions.actual_percent !== null
+    ? `Savings is at ${summary.savings_contributions.actual_percent}% of Income vs your ${summary.savings_contributions.target_percent}% target · ${
+      remainingCents >= 0n
+        ? `${formatAmount(summary.remaining.amount)} remaining unallocated`
+        : `${formatAmount(summary.remaining.amount)} over-allocated beyond reported Income`
+    }`
+    : `Reported Income is ${formatAmount(summary.income.amount)} · Target guideposts: ${summary.needs.target_percent}% Needs / ${summary.wants.target_percent}% Wants / ${summary.savings_contributions.target_percent}% Savings · ${formatAmount(summary.remaining.amount)} remaining unallocated`
+
+  return (
+    <section
+      className="cashflow-allocation-strip"
+      aria-label="Cashflow and 50/30/20 allocation strip"
+    >
+      <div className="cashflow-strip-header">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span className="kpi-icon-badge" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="3" y="6" width="18" height="12" rx="3" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M9 6v12M15 6v12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </span>
+          <div>
+            <h3>Visual Cashflow &amp; 50/30/20 Allocation</h3>
+            <span className="muted" style={{ fontSize: '11px' }}>
+              Proportional breakdown of {formatAmount(summary.income.amount)} reported Income
+            </span>
+          </div>
+        </div>
+        <p className="cashflow-insight">{insightText}</p>
+      </div>
+
+      <div className="kpi-spark-bar allocation-bar-track" aria-hidden="true">
+        {denominator > 0n ? (
+          segments.map((segment) => {
+            if (segment.positiveCents <= 0n) return null
+            const widthPercent = (Number(segment.positiveCents) / Number(denominator)) * 100
+            return (
+              <div
+                key={segment.key}
+                className="kpi-spark-segment"
+                style={{
+                  width: `${Math.max(1.5, widthPercent).toFixed(2)}%`,
+                  background: segment.color,
+                  height: '100%',
+                  borderRadius: '999px',
+                  transition: 'width 220ms ease',
+                }}
+                title={`${segment.label}: ${formatAmount(segment.amount)} (${segment.actualPercent ?? '—'}%)`}
+              />
+            )
+          })
+        ) : (
+          <div
+            className="kpi-spark-segment"
+            style={{
+              width: '100%',
+              height: '100%',
+              borderRadius: '999px',
+              background: 'var(--border)',
+              opacity: 0.45,
+            }}
+          />
+        )}
+      </div>
+
+      <div className="allocation-legend-pills">
+        {segments.map((segment) => (
+          <button
+            key={segment.key}
+            type="button"
+            className="allocation-pill"
+            onClick={() => openDrill(segment.metric, segment.label)}
+          >
+            <span
+              className="allocation-pill-dot"
+              aria-hidden="true"
+              style={{ background: segment.color }}
+            />
+            <span>{segment.label}</span>
+            <strong>{formatAmount(segment.amount)}</strong>
+            <small className="muted">
+              {segment.actualPercent !== null ? `${segment.actualPercent}%` : '—'}
+              {segment.targetPercent ? ` / ${segment.targetPercent}%` : ''}
+            </small>
+          </button>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function Breakdown({
   breakdown,
   otherInflows,
@@ -283,49 +512,78 @@ function Breakdown({
   otherInflows: ReportBase['other_inflows_breakdown']
   onSelect: (metric: string, title: string, subcategory: number | null) => void
 }) {
+  const otherTotal = otherInflows.reduce((sum, item) => sum + Math.max(0, Number(item.amount) || 0), 0)
   return (
     <div className="report-breakdowns">
-      {(['NEEDS', 'WANTS', 'SAVINGS'] as const).map((bucket) => (
-        <section key={bucket}>
-          <h3>{bucketLabels[bucket]} subcategories</h3>
-          {breakdown[bucket].length ? (
-            <table>
-              <thead><tr><th>Subcategory</th><th>Net</th><th>Transactions</th></tr></thead>
-              <tbody>{breakdown[bucket].map((row) => (
-                <tr key={`${row.subcategory}-${bucket}`}>
-                  <th><button
-                    className="report-link"
-                    type="button"
-                    onClick={() => onSelect(
-                      bucket === 'SAVINGS' ? 'net_savings_activity' : bucket.toLowerCase(),
-                      `${row.subcategory_name} · ${bucketLabels[bucket]}`,
-                      row.subcategory,
-                    )}
-                  >{row.subcategory_name}</button></th>
-                  <td className="amount-cell">{formatAmount(row.amount)}</td>
-                  <td>{row.transaction_count}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          ) : <p className="muted">No eligible transactions.</p>}
-        </section>
-      ))}
+      {(['NEEDS', 'WANTS', 'SAVINGS'] as const).map((bucket) => {
+        const rows = breakdown[bucket]
+        const bucketTotal = rows.reduce((sum, item) => sum + Math.max(0, Number(item.amount) || 0), 0)
+        return (
+          <section key={bucket}>
+            <h3>{bucketLabels[bucket]} subcategories</h3>
+            {rows.length ? (
+              <table>
+                <thead><tr><th>Subcategory</th><th>Net</th><th>Transactions</th></tr></thead>
+                <tbody>{rows.map((row) => {
+                  const rowValue = Math.max(0, Number(row.amount) || 0)
+                  const sharePercent = bucketTotal > 0 ? Math.min(100, Math.max(0, (rowValue / bucketTotal) * 100)) : 0
+                  return (
+                    <tr key={`${row.subcategory}-${bucket}`}>
+                      <th>
+                        <button
+                          className="report-link"
+                          type="button"
+                          onClick={() => onSelect(
+                            bucket === 'SAVINGS' ? 'net_savings_activity' : bucket.toLowerCase(),
+                            `${row.subcategory_name} · ${bucketLabels[bucket]}`,
+                            row.subcategory,
+                          )}
+                        >{row.subcategory_name}</button>
+                        <div className="progress-track" aria-hidden="true">
+                          <div
+                            className={`progress-fill progress-fill--${bucket.toLowerCase()}`}
+                            style={{ width: `${sharePercent.toFixed(1)}%` }}
+                          />
+                        </div>
+                      </th>
+                      <td className="amount-cell">{formatAmount(row.amount)}</td>
+                      <td>{row.transaction_count}</td>
+                    </tr>
+                  )
+                })}</tbody>
+              </table>
+            ) : <p className="muted">No eligible transactions.</p>}
+          </section>
+        )
+      })}
       <section>
         <h3>Other Inflows</h3>
         {otherInflows.length ? (
           <table>
             <thead><tr><th>Subcategory</th><th>Amount</th><th>Transactions</th></tr></thead>
-            <tbody>{otherInflows.map((row) => (
-              <tr key={row.subcategory ?? 'uncategorized'}>
-                <th><button
-                  className="report-link"
-                  type="button"
-                  onClick={() => onSelect('other_inflows', `${row.subcategory_name} · Other Inflows`, row.subcategory)}
-                >{row.subcategory_name}</button></th>
-                <td className="amount-cell">{formatAmount(row.amount)}</td>
-                <td>{row.transaction_count}</td>
-              </tr>
-            ))}</tbody>
+            <tbody>{otherInflows.map((row) => {
+              const rowValue = Math.max(0, Number(row.amount) || 0)
+              const sharePercent = otherTotal > 0 ? Math.min(100, Math.max(0, (rowValue / otherTotal) * 100)) : 0
+              return (
+                <tr key={row.subcategory ?? 'uncategorized'}>
+                  <th>
+                    <button
+                      className="report-link"
+                      type="button"
+                      onClick={() => onSelect('other_inflows', `${row.subcategory_name} · Other Inflows`, row.subcategory)}
+                    >{row.subcategory_name}</button>
+                    <div className="progress-track" aria-hidden="true">
+                      <div
+                        className="progress-fill"
+                        style={{ width: `${sharePercent.toFixed(1)}%` }}
+                      />
+                    </div>
+                  </th>
+                  <td className="amount-cell">{formatAmount(row.amount)}</td>
+                  <td>{row.transaction_count}</td>
+                </tr>
+              )
+            })}</tbody>
           </table>
         ) : <p className="muted">No eligible transactions.</p>}
       </section>
@@ -375,19 +633,41 @@ function TrendChart({
   const high = maximum + padding
   const x = (index: number) => left + (points.length <= 1 ? chartWidth / 2 : index * chartWidth / (points.length - 1))
   const y = (value: string | number) => top + (high - Number(value)) * chartHeight / (high - low)
+  const baselineY = Math.min(top + chartHeight, Math.max(top, y(0)))
+  const slugTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, '-')
   const linePaths = lines.map((line) => {
     let active = false
+    const segments: { x: number; y: number }[][] = []
+    let currentSegment: { x: number; y: number }[] = []
     const path = points.map((point, index) => {
       const value = point.values[line.key]
       if (value === null || value === undefined) {
         active = false
+        if (currentSegment.length) {
+          segments.push(currentSegment)
+          currentSegment = []
+        }
         return ''
       }
-      const command = `${active ? 'L' : 'M'} ${x(index)} ${y(value)}`
+      const px = x(index)
+      const py = y(value)
+      currentSegment.push({ x: px, y: py })
+      const command = `${active ? 'L' : 'M'} ${px} ${py}`
       active = true
       return command
     }).filter(Boolean).join(' ')
-    return { ...line, path }
+    if (currentSegment.length) segments.push(currentSegment)
+    const areaPath = segments
+      .filter((segment) => segment.length >= 2)
+      .map((segment) => {
+        const first = segment[0]
+        const last = segment[segment.length - 1]
+        const topEdge = segment.map((pt, idx) => `${idx === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ')
+        return `${topEdge} L ${last.x} ${baselineY} L ${first.x} ${baselineY} Z`
+      })
+      .join(' ')
+    const gradientId = `trend-area-${slugTitle}-${line.key}`
+    return { ...line, path, areaPath, gradientId }
   })
 
   if (!points.length) return <section className="historical-chart"><h3>{title}</h3><p className="muted">No transaction history to chart.</p></section>
@@ -405,6 +685,15 @@ function TrendChart({
           aria-label={`${title}. Values are also available in the table below.`}
         >
           <title>{title}</title>
+          <defs>
+            {linePaths.map((line) => (
+              <linearGradient key={line.gradientId} id={line.gradientId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={line.color} stopOpacity="0.24" />
+                <stop offset="72%" stopColor={line.color} stopOpacity="0.06" />
+                <stop offset="100%" stopColor={line.color} stopOpacity="0.0" />
+              </linearGradient>
+            ))}
+          </defs>
           {[0, 0.5, 1].map((fraction) => {
             const value = high - fraction * (high - low)
             const yPosition = top + fraction * chartHeight
@@ -432,6 +721,14 @@ function TrendChart({
               </text>
             </g>
           ))}
+          {linePaths.map((line) => line.areaPath ? (
+            <path
+              key={`${line.key}-area`}
+              d={line.areaPath}
+              fill={`url(#${line.gradientId})`}
+              aria-hidden="true"
+            />
+          ) : null)}
           {linePaths.map((line) => (
             <path key={line.key} className="trend-series-line" d={line.path} stroke={line.color}>
               <title>{line.label}</title>
@@ -703,7 +1000,8 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
     setDrilldown(null)
   }
 
-  const summary = report?.summary
+  const activeReport = report
+  const summary = activeReport?.summary
   const points = useMemo(
     () => report && ('monthly_series' in report || 'trend_series' in report)
       ? ('trend_series' in report ? report.trend_series : report.monthly_series).map(summaryPoint)
@@ -814,17 +1112,139 @@ export default function Reports({ reload, onReview }: { reload: number; onReview
       </div>
       {error && <p className="message message--error" role="alert">{error}</p>}
       {notice && <p className="table-notice" role="status">{notice}</p>}
-      {report && summary && (
+      {activeReport && summary && (
         <>
-          <CompletenessNotice completeness={report.data_completeness} onReview={(reason) => onReview(reason, report.period.start_date || '', report.period.end_date || '')} />
-          {level === 'range' && 'ledger_transaction_count' in report && (
-            <p className="muted">{periodStatus(report.data_completeness, report.ledger_transaction_count, summary)} · {report.ledger_transaction_count} transactions</p>
+          <CompletenessNotice completeness={activeReport.data_completeness} onReview={(reason) => onReview(reason, activeReport.period.start_date || '', activeReport.period.end_date || '')} />
+          {level === 'range' && 'ledger_transaction_count' in activeReport && (
+            <p className="muted">{periodStatus(activeReport.data_completeness, activeReport.ledger_transaction_count, summary)} · {activeReport.ledger_transaction_count} transactions</p>
           )}
-          {(level === 'range' || (level === 'month' && isMonthlyReport(report))) ? (
+          <div className="kpi-strip">
+            <div className="kpi-card kpi-card--accent">
+              <div className="kpi-card-header">
+                <span className="kpi-label">Income</span>
+                <span className="kpi-icon-badge kpi-icon-badge--income" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.75" />
+                    <path d="M12 7.5v9M9.5 10c0-1.1 1.12-2 2.5-2s2.5.9 2.5 2c0 1.25-1.1 1.65-2.5 2s-2.5.75-2.5 2c0 1.1 1.12 2 2.5 2s2.5-.9 2.5-2" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                  </svg>
+                </span>
+              </div>
+              <strong className="kpi-value">{formatAmount(activeReport.summary.income.amount)}</strong>
+              <div className="kpi-sub">
+                <span>{`${activeReport.summary.income.transaction_count} transactions`}</span>
+                {amountInCents(activeReport.summary.other_inflows.amount) !== 0n && (
+                  <span>{`Other Inflows: ${formatAmount(activeReport.summary.other_inflows.amount)}`}</span>
+                )}
+              </div>
+            </div>
+            <div className="kpi-card kpi-card--Needs">
+              <div className="kpi-card-header">
+                <span className="kpi-label">Needs</span>
+                <span className="kpi-icon-badge" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M4 10.5L12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19v-8.5Z" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+                    <path d="M9.5 20.5V14h5v6.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+              </div>
+              <div className="kpi-value-row">
+                <strong className="kpi-value">{formatAmount(activeReport.summary.needs.amount)}</strong>
+                <KpiRingGauge
+                  actualPercent={activeReport.summary.needs.actual_percent}
+                  targetPercent={activeReport.summary.needs.target_percent}
+                  color="var(--chart-needs)"
+                />
+              </div>
+              <div className="kpi-sub">
+                <span>{`${activeReport.summary.needs.actual_percent ?? '—'}% of Income (Target ${activeReport.summary.needs.target_percent}%)`}</span>
+              </div>
+              <div className="progress-track" aria-hidden="true">
+                <div
+                  className="progress-fill progress-fill--needs"
+                  style={{ width: `${clampPercent(activeReport.summary.needs.actual_percent)}%` }}
+                />
+              </div>
+            </div>
+            <div className="kpi-card kpi-card--Wants">
+              <div className="kpi-card-header">
+                <span className="kpi-label">Wants</span>
+                <span className="kpi-icon-badge" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M6 8h12l-1 11.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 19.5L6 8Z" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+                    <path d="M9 8V6.5a3 3 0 0 1 6 0V8" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                  </svg>
+                </span>
+              </div>
+              <div className="kpi-value-row">
+                <strong className="kpi-value">{formatAmount(activeReport.summary.wants.amount)}</strong>
+                <KpiRingGauge
+                  actualPercent={activeReport.summary.wants.actual_percent}
+                  targetPercent={activeReport.summary.wants.target_percent}
+                  color="var(--chart-wants)"
+                />
+              </div>
+              <div className="kpi-sub">
+                <span>{`${activeReport.summary.wants.actual_percent ?? '—'}% of Income (Target ${activeReport.summary.wants.target_percent}%)`}</span>
+              </div>
+              <div className="progress-track" aria-hidden="true">
+                <div
+                  className="progress-fill progress-fill--wants"
+                  style={{ width: `${clampPercent(activeReport.summary.wants.actual_percent)}%` }}
+                />
+              </div>
+            </div>
+            <div className="kpi-card kpi-card--Savings">
+              <div className="kpi-card-header">
+                <span className="kpi-label">Savings Contributions</span>
+                <span className="kpi-icon-badge" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M12 3.5l7 3v5.2c0 4.5-2.98 8.4-7 9.8-4.02-1.4-7-5.3-7-9.8V6.5l7-3Z" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+                    <path d="M9 12.5l2 2 4-4.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+              </div>
+              <div className="kpi-value-row">
+                <strong className="kpi-value">{formatAmount(activeReport.summary.savings_contributions.amount)}</strong>
+                <KpiRingGauge
+                  actualPercent={activeReport.summary.savings_contributions.actual_percent}
+                  targetPercent={activeReport.summary.savings_contributions.target_percent}
+                  color="var(--chart-savings)"
+                />
+              </div>
+              <div className="kpi-sub">
+                <span>{`${activeReport.summary.savings_contributions.actual_percent ?? '—'}% of Income (Target ${activeReport.summary.savings_contributions.target_percent}%)`}</span>
+                <span>{`Net: ${formatAmount(activeReport.summary.net_savings_activity.amount)}`}</span>
+              </div>
+              <div className="progress-track" aria-hidden="true">
+                <div
+                  className="progress-fill progress-fill--savings"
+                  style={{ width: `${clampPercent(activeReport.summary.savings_contributions.actual_percent)}%` }}
+                />
+              </div>
+            </div>
+            <div className={`kpi-card${amountInCents(activeReport.summary.remaining.amount) < 0n ? ' kpi-card--warning' : ''}`}>
+              <div className="kpi-card-header">
+                <span className="kpi-label">Remaining / Unallocated</span>
+                <span className="kpi-icon-badge" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <rect x="3.5" y="6" width="17" height="12.5" rx="2.5" fill="currentColor" fillOpacity="0.18" stroke="currentColor" strokeWidth="1.75" />
+                    <circle cx="16" cy="12.25" r="1.5" fill="currentColor" />
+                    <path d="M7 9.5h5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                  </svg>
+                </span>
+              </div>
+              <strong className="kpi-value">{formatAmount(activeReport.summary.remaining.amount)}</strong>
+              <div className="kpi-sub">
+                <span>Income − Needs − Wants − Savings</span>
+              </div>
+            </div>
+          </div>
+          <CashflowAllocationStrip summary={summary} openDrill={openDrill} />
+          {(level === 'range' || (level === 'month' && isMonthlyReport(activeReport))) ? (
             <div className="report-summary-layout">
               <SummaryTable summary={summary} openDrill={openDrill} />
               <section className="report-allocation-chart">
-                <MonthlyDetails report={report} openDrill={openDrill} />
+                <MonthlyDetails report={activeReport} openDrill={openDrill} />
               </section>
             </div>
           ) : <SummaryTable summary={summary} openDrill={openDrill} />}

@@ -28,9 +28,15 @@ Range reports reuse the same Decimal accounting and current allocation targets a
 
 The allocation donut uses the monthly report's rules: Needs, Wants, Savings Contributions, and non-negative Remaining partition Income; when allocations exceed Income it shows their share of allocations and the excess. Negative allocation buckets make the chart unavailable rather than distorting values. Incomplete data is labeled partial. Summary lines, subcategories, and donut segments open server-paginated transaction contributions, including a Remaining reconciliation; Review links retain the selected report dates.
 
-## Import a CSV
+## Import a CSV & Manage Accounts
 
-Create an active account in Django admin, open PennyTracker, and choose **Import CSV**. Select the destination account and a supported CSV file (maximum 20 MiB), preview it, then confirm. The original filename is audit metadata only; the selected account and CSV contents determine the import. The first importer accepts posted SoFi checking CSVs, and exact file re-imports to the same account are blocked.
+Open PennyTracker and go to **Accounts & Backups** (or use Django admin) to create an active account, then choose **Import CSV** from **Transactions**. Select the destination account and a supported CSV file (maximum 20 MiB), preview it, then confirm. The original filename is audit metadata only; the selected account and CSV contents determine the import. The first importer accepts posted SoFi checking CSVs, and exact file re-imports to the same account are blocked.
+
+## Recurring, Debts, Export, and Backups
+
+- **Recurring:** Track monthly bills, monthly subscriptions, and annual subscriptions with automatic calculation of effective monthly (`amount / 12` for annual items) and effective annual costs.
+- **Debts:** Track credit cards, student loans (with combined servicer summaries when multiple loans share a lender), auto loans, personal loans, and mortgages. Balance updates record dated snapshots rather than overwriting previous balances so paydown progress is preserved.
+- **Export & Backups:** Export the active filtered transaction view as a CSV from **Transactions** or **Review**, inspect past CSV Import Batches, and download a consistent `.sqlite3` database backup from **Accounts & Backups**.
 
 ## Run without Docker
 

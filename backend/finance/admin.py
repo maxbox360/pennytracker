@@ -1,5 +1,35 @@
 from django.contrib import admin
-from .models import Account, BudgetTargetSettings, ImportBatch, Subcategory, Transaction
+from .models import (
+    Account,
+    BudgetTargetSettings,
+    Debt,
+    DebtBalanceSnapshot,
+    ImportBatch,
+    RecurringExpense,
+    Subcategory,
+    Transaction,
+)
+
+
+class DebtBalanceSnapshotInline(admin.TabularInline):
+    model = DebtBalanceSnapshot
+    extra = 1
+
+
+@admin.register(Debt)
+class DebtAdmin(admin.ModelAdmin):
+    list_display = ('name', 'lender', 'debt_type', 'apr', 'minimum_payment', 'due_day', 'is_active')
+    list_filter = ('debt_type', 'is_active')
+    search_fields = ('name', 'lender', 'notes')
+    inlines = [DebtBalanceSnapshotInline]
+
+
+@admin.register(RecurringExpense)
+class RecurringExpenseAdmin(admin.ModelAdmin):
+    list_display = ('name', 'kind', 'amount', 'due_day', 'renewal_date', 'subcategory', 'auto_pay', 'is_active')
+    list_filter = ('kind', 'auto_pay', 'is_active')
+    search_fields = ('name', 'notes')
+
 
 
 @admin.register(BudgetTargetSettings)

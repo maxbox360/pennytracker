@@ -3217,3 +3217,194 @@ class RuleKindMigrationTests(TransactionTestCase):
         finally:
             executor = MigrationExecutor(connection)
             executor.migrate(executor.loader.graph.leaf_nodes())
+
+
+class DebtsRecurringExportAndAccountsApiTests(APITestCase):
+    def setUp(self):
+        self.account = Account.objects.create(name='Primary Checking', institution='Example Bank')
+        self.needs = Subcategory.objects.create(name='Utilities', budget_bucket=BudgetBucket.NEEDS)
+        self.wants = Subcategory.objects.create(name='Streaming', budget_bucket=BudgetBucket.WANTS)
+        self.savings = Subcategory.objects.create(name='Emergency Fund', budget_bucket=BudgetBucket.SAVINGS)
+
+    def test_account_deletion_is_blocked_when_transactions_exist(self):
+        empty_account = Account.objects.create(name='Unused Account')
+        delete_empty = self.client.delete(f'/api/accounts/{empty_account.id}/')
+        self.assertEqual(delete_empty.status_code, 204)
+
+        Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 2, 1),
+            raw_description='Synthetic transaction',
+            amount=Decimal('-15.00'),
+            classification=Transaction.Classification.EXPENSE,
+            subcategory=self.needs,
+            budget_bucket=BudgetBucket.NEEDS,
+        )
+        delete_used = self.client.delete(f'/api/accounts/{self.account.id}/')
+        self.assertEqual(delete_used.status_code, 409)
+        self.assertTrue(Account.objects.filter(pk=self.account.pk).exists())
+
+    def test_debt_and_balance_snapshot_lifecycle_preserves_paydown_history(self):
+        response = self.client.post(
+            '/api/debts/',
+            {
+                'name': 'Student Loan AA',
+                'lender': 'Example Student Loan Servicer',
+                'debt_type': 'STUDENT_LOAN',
+                'apr': '4.50',
+                'minimum_payment': '125.00',
+                'due_day': 15,
+                'initial_balance': '8500.00',
+                'initial_balance_date': '2026-01-01',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        debt_id = response.data['id']
+        self.assertEqual(response.data['current_balance'], '8500.00')
+        self.assertEqual(response.data['original_balance'], '8500.00')
+        self.assertEqual(len(response.data['snapshots']), 1)
+
+        snap2 = self.client.post(
+            f'/api/debts/{debt_id}/snapshots/',
+            {'recorded_date': '2026-02-01', 'balance': '8100.00', 'notes': 'Feb payment'},
+            format='json',
+        )
+        self.assertEqual(snap2.status_code, 201, snap2.content)
+        self.assertEqual(snap2.data['current_balance'], '8100.00')
+        self.assertEqual(snap2.data['previous_balance'], '8500.00')
+        self.assertEqual(snap2.data['balance_change'], '-400.00')
+        self.assertEqual(snap2.data['paid_down_amount'], '400.00')
+        self.assertEqual(snap2.data['paid_down_percent'], '4.71')
+
+        latest_snap_id = snap2.data['snapshots'][0]['id']
+        removed = self.client.delete(f'/api/debts/{debt_id}/snapshots/{latest_snap_id}/')
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual(removed.data['current_balance'], '8500.00')
+
+    def test_recurring_expense_effective_costs_and_summary(self):
+        bill = self.client.post(
+            '/api/recurring-expenses/',
+            {
+                'name': 'Electric Bill',
+                'kind': 'BILL',
+                'amount': '150.00',
+                'due_day': 10,
+                'subcategory': self.needs.id,
+                'auto_pay': True,
+            },
+            format='json',
+        )
+        self.assertEqual(bill.status_code, 201, bill.content)
+        self.assertEqual(bill.data['effective_monthly_cost'], '150.00')
+        self.assertEqual(bill.data['effective_annual_cost'], '1800.00')
+
+        monthly_sub = self.client.post(
+            '/api/recurring-expenses/',
+            {
+                'name': 'Video Streaming',
+                'kind': 'MONTHLY_SUBSCRIPTION',
+                'amount': '15.00',
+                'due_day': 22,
+                'subcategory': self.wants.id,
+            },
+            format='json',
+        )
+        self.assertEqual(monthly_sub.status_code, 201, monthly_sub.content)
+
+        annual_sub = self.client.post(
+            '/api/recurring-expenses/',
+            {
+                'name': 'Annual Membership',
+                'kind': 'ANNUAL_SUBSCRIPTION',
+                'amount': '120.00',
+                'renewal_date': '2026-11-15',
+                'subcategory': self.wants.id,
+                'auto_pay': True,
+            },
+            format='json',
+        )
+        self.assertEqual(annual_sub.status_code, 201, annual_sub.content)
+        self.assertEqual(annual_sub.data['effective_monthly_cost'], '10.00')
+        self.assertEqual(annual_sub.data['effective_annual_cost'], '120.00')
+
+        summary = self.client.get('/api/recurring-expenses/summary/')
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.data['active_count'], 3)
+        self.assertEqual(summary.data['monthly_bills_total'], '150.00')
+        self.assertEqual(summary.data['monthly_subscriptions_total'], '15.00')
+        self.assertEqual(summary.data['annual_subscriptions_total'], '120.00')
+        self.assertEqual(summary.data['effective_monthly_total'], '175.00')
+        self.assertEqual(summary.data['effective_annual_total'], '2100.00')
+
+    def test_bulk_merchant_and_savings_effect_operations(self):
+        t1 = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 2, 10),
+            raw_description='SQ *COFFEE SHOP 1',
+            amount=Decimal('-5.00'),
+            classification=Transaction.Classification.UNKNOWN,
+        )
+        t2 = Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 2, 11),
+            raw_description='SQ *COFFEE SHOP 2',
+            amount=Decimal('-6.50'),
+            classification=Transaction.Classification.UNKNOWN,
+        )
+        merchant_res = self.client.post(
+            '/api/transactions/bulk/',
+            {
+                'operation': 'merchant',
+                'transaction_ids': [t1.id, t2.id],
+                'merchant': 'Local Coffee Roaster',
+            },
+            format='json',
+        )
+        self.assertEqual(merchant_res.status_code, 200)
+        t1.refresh_from_db()
+        t2.refresh_from_db()
+        self.assertEqual(t1.merchant, 'Local Coffee Roaster')
+        self.assertEqual(t2.merchant, 'Local Coffee Roaster')
+
+        savings_res = self.client.post(
+            '/api/transactions/bulk/',
+            {
+                'operation': 'savings_effect',
+                'transaction_ids': [t1.id, t2.id],
+                'savings_effect': 'CONTRIBUTION',
+                'subcategory': self.savings.id,
+            },
+            format='json',
+        )
+        self.assertEqual(savings_res.status_code, 200, savings_res.content)
+        t1.refresh_from_db()
+        self.assertEqual(t1.classification, Transaction.Classification.TRANSFER)
+        self.assertEqual(t1.savings_effect, SavingsEffect.CONTRIBUTION)
+        self.assertEqual(t1.subcategory, self.savings)
+        self.assertEqual(t1.budget_bucket, BudgetBucket.SAVINGS)
+        self.assertTrue(t1.manually_resolved)
+
+    def test_transaction_csv_export_and_sqlite_backup(self):
+        Transaction.objects.create(
+            account=self.account,
+            date=date(2026, 2, 12),
+            raw_description='Synthetic Market Export',
+            merchant='Corner Market',
+            amount=Decimal('-32.10'),
+            classification=Transaction.Classification.EXPENSE,
+            subcategory=self.needs,
+            budget_bucket=BudgetBucket.NEEDS,
+        )
+        csv_res = self.client.get('/api/transactions/export-csv/?classification=EXPENSE')
+        self.assertEqual(csv_res.status_code, 200)
+        self.assertIn('text/csv', csv_res['Content-Type'])
+        content = csv_res.content.decode('utf-8')
+        self.assertIn('Synthetic Market Export', content)
+        self.assertIn('Corner Market', content)
+        self.assertIn('-32.10', content)
+
+        backup_res = self.client.get('/api/backup/sqlite/')
+        self.assertEqual(backup_res.status_code, 200)
+        self.assertTrue(backup_res.content.startswith(b'SQLite format 3'))
+

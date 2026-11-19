@@ -191,6 +191,9 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
   const [selected, setSelected] = useState<number[]>([])
   const [bulkClassification, setBulkClassification] = useState<Classification | ''>('')
   const [bulkSubcategory, setBulkSubcategory] = useState('')
+  const [bulkMerchant, setBulkMerchant] = useState('')
+  const [bulkSavingsEffect, setBulkSavingsEffect] = useState<SavingsEffect>('CONTRIBUTION')
+  const [bulkSavingsSubcategory, setBulkSavingsSubcategory] = useState('')
   const [pendingRulePrompt, setPendingRulePrompt] = useState<{
     id: number
     matching: number
@@ -395,10 +398,15 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
     }
   }
 
-  async function runBulk(operation: 'classification' | 'subcategory' | 'mark_reviewed') {
+  async function runBulk(operation: 'classification' | 'subcategory' | 'mark_reviewed' | 'merchant' | 'savings_effect') {
     const body: Record<string, unknown> = { operation, transaction_ids: selected }
     if (operation === 'classification') body.classification = bulkClassification
     if (operation === 'subcategory') body.subcategory = bulkSubcategory
+    if (operation === 'merchant') body.merchant = bulkMerchant
+    if (operation === 'savings_effect') {
+      body.savings_effect = bulkSavingsEffect
+      body.subcategory = bulkSavingsEffect === 'NONE' ? null : bulkSavingsSubcategory
+    }
     setError('')
     try {
       const response = await apiFetch('/api/transactions/bulk/', {
@@ -480,14 +488,159 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
       : { field, direction: field === 'date' ? 'desc' : 'asc' })
   }
 
+  function exportQueryString() {
+    const params = new URLSearchParams()
+    if (accountFilter) params.set('account', accountFilter)
+    if (classificationFilter) params.set('classification', classificationFilter)
+    if (sourceTypeFilter.trim()) params.set('source_type', sourceTypeFilter.trim())
+    if (subcategoryFilter) params.set('subcategory', subcategoryFilter)
+    if (bucketFilter) params.set('budget_bucket', bucketFilter)
+    if (reviewStatusFilter) params.set('review_status', reviewStatusFilter)
+    if (startDate) params.set('start_date', startDate)
+    if (endDate) params.set('end_date', endDate)
+    if (search.trim()) params.set('search', search.trim())
+    if (mode === 'review' && reasonFilter) params.set('review_reason', reasonFilter)
+    params.set('ordering', `${sort.direction === 'desc' ? '-' : ''}${sort.field}`)
+    return params.toString()
+  }
+
+  const savingsSubcategories = subcategories.filter(
+    (subcategory) => subcategory.scope === 'BUDGET' && subcategory.budget_bucket === 'SAVINGS',
+  )
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / 100))
+  let pageInflowCents = 0
+  let pageOutflowCents = 0
+  let pageCategorizedCount = 0
+  let pagePendingReviewCount = 0
+  let pageDuplicateCount = 0
+  for (const item of transactions) {
+    const cents = Math.round(Number(item.amount) * 100)
+    if (!Number.isNaN(cents)) {
+      if (cents < 0) pageOutflowCents += Math.abs(cents)
+      else pageInflowCents += cents
+    }
+    if (item.subcategory !== null) pageCategorizedCount += 1
+    if (item.review_status === 'PENDING') pagePendingReviewCount += 1
+    if (item.duplicate_resolution === 'UNRESOLVED') pageDuplicateCount += 1
+  }
+  const pageUncategorizedCount = transactions.length - pageCategorizedCount
+  function formatCents(cents: number, negative = false) {
+    const abs = Math.abs(cents)
+    const whole = Math.floor(abs / 100)
+    const fraction = String(abs % 100).padStart(2, '0')
+    return formatAmount(`${negative && abs > 0 ? '-' : ''}${whole}.${fraction}`)
+  }
+
   return (
     <section className="ledger-card" aria-labelledby="transaction-table-heading">
-      <div className="ledger-heading">
+      <div className="ledger-heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
         <div>
           <h2 id="transaction-table-heading">{mode === 'review' ? 'Pending review' : 'All transactions'}</h2>
           <p>{loading ? 'Loading transactions…' : `${totalCount} transactions`}</p>
         </div>
+        <a
+          className="secondary-button"
+          href={`/api/transactions/export-csv/?${exportQueryString()}`}
+          download
+          style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+        >
+          Export filtered CSV
+        </a>
       </div>
+
+      {!loading && transactions.length > 0 && (
+        <div className="kpi-strip">
+          <div className="kpi-card">
+            <div className="kpi-card-header">
+              <span className="kpi-label">Total Matching</span>
+              <span className="kpi-icon-badge" aria-hidden="true">
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+                  <rect x="2.75" y="3.5" width="14.5" height="13" rx="3" fill="var(--info-soft)" stroke="var(--chart-needs)" strokeWidth="1.5" />
+                  <path d="M6 7.5h8M6 10.5h8M6 13.5h5" stroke="var(--chart-needs)" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </span>
+            </div>
+            <strong className="kpi-value">{totalCount.toLocaleString()}</strong>
+            <span className="kpi-sub">
+              Page {page} of {totalPages} · {transactions.length} visible
+            </span>
+          </div>
+          <div className="kpi-card kpi-card--accent">
+            <div className="kpi-card-header">
+              <span className="kpi-label">Page Inflow / Outflow</span>
+              <span className="kpi-icon-badge" aria-hidden="true">
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+                  <circle cx="10" cy="10" r="7.25" fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth="1.5" />
+                  <path d="M7.5 13V7m0 0L5.25 9.25M7.5 7l2.25 2.25" stroke="var(--positive)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M12.5 7v6m0 0 2.25-2.25M12.5 13l-2.25-2.25" stroke="var(--negative)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+            </div>
+            <strong className="kpi-value">
+              {formatCents(pageInflowCents)} / {formatCents(pageOutflowCents, true)}
+            </strong>
+            <span className="kpi-sub">
+              Inflow {formatCents(pageInflowCents)} · Outflow {formatCents(pageOutflowCents, true)}
+            </span>
+            <div className="progress-track kpi-spark-bar" aria-hidden="true" style={{ display: 'flex' }}>
+              <div
+                className="progress-fill progress-fill--positive"
+                style={{
+                  width: `${pageInflowCents + pageOutflowCents > 0
+                    ? Math.round((pageInflowCents / (pageInflowCents + pageOutflowCents)) * 100)
+                    : 50}%`,
+                }}
+              />
+              <div
+                className="progress-fill progress-fill--negative"
+                style={{
+                  width: `${pageInflowCents + pageOutflowCents > 0
+                    ? 100 - Math.round((pageInflowCents / (pageInflowCents + pageOutflowCents)) * 100)
+                    : 50}%`,
+                }}
+              />
+            </div>
+          </div>
+          {mode === 'review' ? (
+            <div className="kpi-card kpi-card--warning">
+              <div className="kpi-card-header">
+                <span className="kpi-label">Review Queue</span>
+                <span className="kpi-icon-badge" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+                    <path d="M10 2.75l6.5 2.5v4.5c0 4.3-2.8 7.2-6.5 8.5-3.7-1.3-6.5-4.2-6.5-8.5v-4.5l6.5-2.5z" fill="var(--warning-soft)" stroke="var(--warning)" strokeWidth="1.5" />
+                    <path d="M10 7v3.5M10 13h.01" stroke="var(--warning)" strokeWidth="1.75" strokeLinecap="round" />
+                  </svg>
+                </span>
+              </div>
+              <strong className="kpi-value">
+                {selected.length > 0 ? `${selected.length} checked` : `${pagePendingReviewCount} pending`}
+              </strong>
+              <span className="kpi-sub">
+                {selected.length} selected · {pageDuplicateCount} possible duplicate{pageDuplicateCount === 1 ? '' : 's'}
+              </span>
+            </div>
+          ) : (
+            <div className="kpi-card">
+              <div className="kpi-card-header">
+                <span className="kpi-label">Page Categorization</span>
+                <span className="kpi-icon-badge" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+                    <circle cx="10" cy="10" r="7.25" fill="var(--positive-soft)" stroke="var(--positive)" strokeWidth="1.5" />
+                    <path d="M6.75 10.25l2.25 2.25 4.5-4.75" stroke="var(--positive)" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+              </div>
+              <strong className="kpi-value">
+                {pageCategorizedCount} / {transactions.length}
+              </strong>
+              <span className="kpi-sub">
+                {pageCategorizedCount} categorized · {pageUncategorizedCount} uncategorized
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="ledger-filters">
         <label>
@@ -598,6 +751,50 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
           <button type="button" onClick={() => void runBulk('subcategory')} disabled={!bulkSubcategory}>
             Assign subcategory
           </button>
+          <label>
+            Merchant
+            <input
+              value={bulkMerchant}
+              maxLength={200}
+              placeholder="Clean merchant name"
+              onChange={(event) => setBulkMerchant(event.target.value)}
+            />
+          </label>
+          <button type="button" onClick={() => void runBulk('merchant')}>
+            Set merchant
+          </button>
+          <label>
+            Savings transfer
+            <select
+              value={bulkSavingsEffect}
+              onChange={(event) => setBulkSavingsEffect(event.target.value as SavingsEffect)}
+            >
+              <option value="CONTRIBUTION">Contribution</option>
+              <option value="WITHDRAWAL">Withdrawal</option>
+              <option value="NONE">Ordinary transfer</option>
+            </select>
+          </label>
+          {bulkSavingsEffect !== 'NONE' && (
+            <label>
+              Savings category
+              <select
+                value={bulkSavingsSubcategory}
+                onChange={(event) => setBulkSavingsSubcategory(event.target.value)}
+              >
+                <option value="">Choose…</option>
+                {savingsSubcategories.map((cat) => (
+                  <option key={cat.id} value={cat.id}>{cat.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <button
+            type="button"
+            onClick={() => void runBulk('savings_effect')}
+            disabled={bulkSavingsEffect !== 'NONE' && !bulkSavingsSubcategory}
+          >
+            Set transfer
+          </button>
           <button type="button" onClick={() => void runBulk('mark_reviewed')}>Mark reviewed</button>
         </div>
       )}
@@ -626,6 +823,23 @@ export default function TransactionTable({ mode, reload, initialReason = '', ini
         <p className="message" role="status">Loading transactions…</p>
       ) : transactions.length === 0 ? (
         <div className="empty-state">
+          <svg className="empty-state-illustration" aria-hidden="true" width="96" height="68" viewBox="0 0 96 68" fill="none">
+            {mode === 'review' ? (
+              <>
+                <circle cx="48" cy="34" r="24" fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth="1.75" />
+                <path d="M38 34.5l6.5 6.5 14-14.5" stroke="var(--accent)" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+                <circle cx="75" cy="16" r="4" fill="var(--chart-wants)" />
+                <circle cx="20" cy="48" r="3" fill="var(--chart-needs)" />
+              </>
+            ) : (
+              <>
+                <rect x="16" y="14" width="52" height="38" rx="8" fill="var(--surface-alt)" stroke="var(--border-strong)" strokeWidth="1.6" />
+                <path d="M26 26h28M26 34h20M26 42h14" stroke="var(--muted)" strokeWidth="2" strokeLinecap="round" />
+                <circle cx="66" cy="42" r="14" fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth="1.75" />
+                <path d="M76 52l7 7" stroke="var(--accent)" strokeWidth="2.4" strokeLinecap="round" />
+              </>
+            )}
+          </svg>
           <h3>{mode === 'review' ? 'Review queue is clear' : 'No transactions found'}</h3>
           <p>{mode === 'review' ? 'Transactions needing attention will appear here.' : 'Try changing the filters or import a CSV.'}</p>
         </div>
@@ -765,6 +979,90 @@ type RowProps = {
   onResolve: (resolution: 'DISTINCT' | 'CONFIRMED_DUPLICATE', candidateId?: number) => void
 }
 
+function MerchantAvatar({ item }: { item: Transaction }) {
+  const label = `${item.subcategory_name ?? ''} ${item.merchant || item.raw_description}`.toLowerCase()
+  const isIncome = item.classification === 'INCOME' || item.classification === 'OTHER_INFLOW'
+  const isTransfer = item.classification === 'TRANSFER'
+  const isRefund = item.classification === 'REFUND'
+  const isSavings = item.budget_bucket === 'SAVINGS' || item.savings_effect !== 'NONE'
+  const isNeeds = item.budget_bucket === 'NEEDS'
+  const isWants = item.budget_bucket === 'WANTS'
+
+  const toneClass = isSavings
+    ? 'merchant-avatar--savings'
+    : isNeeds
+      ? 'merchant-avatar--needs'
+      : isWants
+        ? 'merchant-avatar--wants'
+        : isIncome || isRefund
+          ? 'merchant-avatar--income'
+          : isTransfer
+            ? 'merchant-avatar--transfer'
+            : 'merchant-avatar--default'
+
+  const strokeColor = isSavings
+    ? 'var(--chart-savings)'
+    : isNeeds
+      ? 'var(--chart-needs)'
+      : isWants
+        ? 'var(--chart-wants)'
+        : isIncome || isRefund
+          ? 'var(--positive)'
+          : 'var(--accent)'
+
+  const fillColor = isSavings
+    ? 'var(--accent-soft)'
+    : isNeeds
+      ? 'var(--info-soft)'
+      : isWants
+        ? 'var(--warning-soft)'
+        : isIncome || isRefund
+          ? 'var(--positive-soft)'
+          : 'var(--surface-alt)'
+
+  return (
+    <span
+      className={`merchant-avatar ${toneClass}`}
+      aria-hidden="true"
+      style={{ background: fillColor, color: strokeColor }}
+    >
+      <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
+        {isIncome ? (
+          <path d="M4 13.5l4-4 3 3 5-5.5M12 7h4v4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+        ) : isRefund ? (
+          <path d="M5 9.5h8.5a3 3 0 1 1 0 6H9M5 9.5L8 6.5M5 9.5l3 3" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+        ) : isSavings ? (
+          <>
+            <path d="M10 3l6 2.25v4.5c0 3.9-2.55 6.6-6 7.75-3.45-1.15-6-3.85-6-7.75v-4.5L10 3z" stroke="currentColor" strokeWidth="1.65" strokeLinejoin="round" />
+            <path d="M7.5 10.25l1.75 1.75 3.5-3.75" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" />
+          </>
+        ) : isTransfer ? (
+          <path d="M4.5 7.5h11m0 0-2.75-2.75M15.5 7.5l-2.75 2.75M15.5 12.5h-11m0 0 2.75-2.75M4.5 12.5l2.75 2.75" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" />
+        ) : /grocer|market|food|coffee|cafe|dining|restaurant/.test(label) ? (
+          <>
+            <path d="M4 5.5h2l1.6 7h7.2l1.4-5H6.5" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" />
+            <circle cx="8.25" cy="15.25" r="1.25" fill="currentColor" />
+            <circle cx="13.75" cy="15.25" r="1.25" fill="currentColor" />
+          </>
+        ) : /rent|mortgag|home|hous|util|electric|water|power|internet/.test(label) ? (
+          <path d="M3.5 9.5L10 4l6.5 5.5v6a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-6z" stroke="currentColor" strokeWidth="1.65" strokeLinejoin="round" />
+        ) : /gas|uber|lyft|Auto|transit|train|flight|air|park/.test(label) ? (
+          <>
+            <path d="M4.5 11l1.5-4.5h8L15.5 11v3.5h-11V11z" stroke="currentColor" strokeWidth="1.65" strokeLinejoin="round" />
+            <circle cx="7" cy="12.5" r="1" fill="currentColor" />
+            <circle cx="13" cy="12.5" r="1" fill="currentColor" />
+          </>
+        ) : (
+          <>
+            <rect x="3.5" y="5" width="13" height="10" rx="2" stroke="currentColor" strokeWidth="1.65" />
+            <path d="M3.5 8.5h13M6.5 12h3" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" />
+          </>
+        )}
+      </svg>
+    </span>
+  )
+}
+
 function FragmentRow(props: RowProps) {
   const { item, mode, columnCount, selected, editing, draft, subcategories, allSubcategories, reviewStatusLabel } = props
   const reviewing = mode === 'review' && item.review_status === 'PENDING'
@@ -801,9 +1099,12 @@ function FragmentRow(props: RowProps) {
         )}
         <td className="date-cell">{item.date}</td>
         <td>
-          <div className="description">
-            <span>{item.merchant || item.raw_description}</span>
-            {item.merchant && <small>{item.raw_description}</small>}
+          <div className="merchant-cell">
+            <MerchantAvatar item={item} />
+            <div className="description">
+              <span>{item.merchant || item.raw_description}</span>
+              {item.merchant && <small>{item.raw_description}</small>}
+            </div>
           </div>
         </td>
         <td>{item.account_name}</td>

@@ -20,13 +20,16 @@ from rest_framework.routers import DefaultRouter
 from finance.views import (
     AccountViewSet,
     CategorizationRuleViewSet,
+    DebtViewSet,
     ImportBatchViewSet,
+    RecurringExpenseViewSet,
     SubcategoryViewSet,
     TransactionViewSet,
     all_time_report_view,
     budget_target_settings,
     category_trend_view,
     confirm_import,
+    database_backup_view,
     historical_report_drilldown,
     monthly_report_drilldown,
     monthly_report_view,
@@ -42,12 +45,15 @@ router.register('import-batches', ImportBatchViewSet)
 router.register('subcategories', SubcategoryViewSet)
 router.register('categorization-rules', CategorizationRuleViewSet, basename='categorization-rule')
 router.register('transactions', TransactionViewSet, basename='transaction')
+router.register('debts', DebtViewSet, basename='debt')
+router.register('recurring-expenses', RecurringExpenseViewSet, basename='recurring-expense')
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/csrf/', csrf_token, name='csrf-token'),
     path('api/imports/preview/', preview_import, name='import-preview'),
     path('api/imports/', confirm_import, name='import-confirm'),
+    path('api/backup/sqlite/', database_backup_view, name='database-backup'),
     path('api/budget-targets/', budget_target_settings, name='budget-target-settings'),
     path('api/reports/all-time/', all_time_report_view, name='all-time-report'),
     path('api/reports/yearly/', yearly_report_view, name='yearly-report'),

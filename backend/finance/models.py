@@ -583,3 +583,117 @@ class Transaction(models.Model):
 
     def __str__(self):
         return f'{self.date} {self.raw_description} ({self.amount})'
+
+
+class Debt(models.Model):
+    class Type(models.TextChoices):
+        CREDIT_CARD = 'CREDIT_CARD', 'Credit card'
+        STUDENT_LOAN = 'STUDENT_LOAN', 'Student loan'
+        AUTO_LOAN = 'AUTO_LOAN', 'Auto loan'
+        PERSONAL_LOAN = 'PERSONAL_LOAN', 'Personal loan'
+        MORTGAGE = 'MORTGAGE', 'Mortgage'
+        OTHER = 'OTHER', 'Other'
+
+    name = models.CharField(max_length=100)
+    lender = models.CharField(max_length=100, blank=True)
+    debt_type = models.CharField(max_length=20, choices=Type.choices, default=Type.CREDIT_CARD)
+    apr = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('0.00'))
+    minimum_payment = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.00'))
+    original_balance = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    credit_limit = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    due_day = models.PositiveSmallIntegerField(null=True, blank=True)
+    promo_apr_expiration = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'id']
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(apr__gte=0, apr__lte=100),
+                name='valid_debt_apr',
+            ),
+            models.CheckConstraint(
+                condition=Q(minimum_payment__gte=0),
+                name='valid_debt_minimum_payment',
+            ),
+            models.CheckConstraint(
+                condition=Q(original_balance__isnull=True) | Q(original_balance__gte=0),
+                name='valid_debt_original_balance',
+            ),
+            models.CheckConstraint(
+                condition=Q(credit_limit__isnull=True) | Q(credit_limit__gt=0),
+                name='valid_debt_credit_limit',
+            ),
+            models.CheckConstraint(
+                condition=Q(due_day__isnull=True) | Q(due_day__gte=1, due_day__lte=31),
+                name='valid_debt_due_day',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name} ({self.lender})' if self.lender else self.name
+
+
+class DebtBalanceSnapshot(models.Model):
+    debt = models.ForeignKey(Debt, on_delete=models.CASCADE, related_name='snapshots')
+    recorded_date = models.DateField()
+    balance = models.DecimalField(max_digits=14, decimal_places=2)
+    notes = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-recorded_date', '-id']
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(balance__gte=0),
+                name='valid_debt_snapshot_balance',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.debt.name} @ {self.recorded_date}: {self.balance}'
+
+
+class RecurringExpense(models.Model):
+    class Kind(models.TextChoices):
+        BILL = 'BILL', 'Monthly bill'
+        MONTHLY_SUBSCRIPTION = 'MONTHLY_SUBSCRIPTION', 'Monthly subscription'
+        ANNUAL_SUBSCRIPTION = 'ANNUAL_SUBSCRIPTION', 'Annual subscription'
+
+    name = models.CharField(max_length=100)
+    kind = models.CharField(max_length=24, choices=Kind.choices, default=Kind.BILL)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    due_day = models.PositiveSmallIntegerField(null=True, blank=True)
+    renewal_date = models.DateField(null=True, blank=True)
+    subcategory = models.ForeignKey(
+        Subcategory,
+        on_delete=models.PROTECT,
+        related_name='recurring_expenses',
+        null=True,
+        blank=True,
+    )
+    auto_pay = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['kind', 'name', 'id']
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name='valid_recurring_expense_amount',
+            ),
+            models.CheckConstraint(
+                condition=Q(due_day__isnull=True) | Q(due_day__gte=1, due_day__lte=31),
+                name='valid_recurring_expense_due_day',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.name} ({self.amount})'
+

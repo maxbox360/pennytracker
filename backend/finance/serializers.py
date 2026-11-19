@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from rest_framework import serializers
 from .models import (
@@ -6,7 +6,10 @@ from .models import (
     BudgetBucket,
     BudgetTargetSettings,
     CategorizationRule,
+    Debt,
+    DebtBalanceSnapshot,
     ImportBatch,
+    RecurringExpense,
     RuleMatchField,
     RuleMatchType,
     SavingsEffect,
@@ -440,3 +443,231 @@ class TransactionSerializer(serializers.ModelSerializer):
                     'savings_effect': 'Choose a Savings subcategory before marking a contribution or withdrawal.'
                 })
         return attrs
+
+
+def _quantize_money(value):
+    return str((value or Decimal('0.00')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+
+class DebtBalanceSnapshotSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DebtBalanceSnapshot
+        fields = ('id', 'debt', 'recorded_date', 'balance', 'notes', 'created_at')
+        read_only_fields = ('debt', 'created_at')
+
+    def validate_balance(self, value):
+        if value < Decimal('0.00'):
+            raise serializers.ValidationError('Balance must be zero or positive.')
+        return value
+
+
+class DebtSerializer(serializers.ModelSerializer):
+    snapshots = DebtBalanceSnapshotSerializer(many=True, read_only=True)
+    current_balance = serializers.SerializerMethodField()
+    previous_balance = serializers.SerializerMethodField()
+    balance_change = serializers.SerializerMethodField()
+    paid_down_amount = serializers.SerializerMethodField()
+    paid_down_percent = serializers.SerializerMethodField()
+    initial_balance = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        required=False,
+        write_only=True,
+        allow_null=True,
+    )
+    initial_balance_date = serializers.DateField(
+        required=False,
+        write_only=True,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = Debt
+        fields = (
+            'id',
+            'name',
+            'lender',
+            'debt_type',
+            'apr',
+            'minimum_payment',
+            'original_balance',
+            'credit_limit',
+            'due_day',
+            'promo_apr_expiration',
+            'is_active',
+            'notes',
+            'current_balance',
+            'previous_balance',
+            'balance_change',
+            'paid_down_amount',
+            'paid_down_percent',
+            'snapshots',
+            'initial_balance',
+            'initial_balance_date',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('created_at', 'updated_at')
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('Enter a debt name.')
+        return value
+
+    def validate_lender(self, value):
+        return value.strip()
+
+    def validate(self, attrs):
+        errors = {}
+        apr = attrs.get('apr', getattr(self.instance, 'apr', Decimal('0.00')))
+        if apr is not None and not Decimal('0.00') <= apr <= Decimal('100.00'):
+            errors['apr'] = 'Enter an APR between 0 and 100.'
+        minimum_payment = attrs.get('minimum_payment', getattr(self.instance, 'minimum_payment', Decimal('0.00')))
+        if minimum_payment is not None and minimum_payment < Decimal('0.00'):
+            errors['minimum_payment'] = 'Minimum payment must be zero or positive.'
+        original_balance = attrs.get('original_balance', getattr(self.instance, 'original_balance', None))
+        if original_balance is not None and original_balance < Decimal('0.00'):
+            errors['original_balance'] = 'Original balance must be zero or positive.'
+        credit_limit = attrs.get('credit_limit', getattr(self.instance, 'credit_limit', None))
+        if credit_limit is not None and credit_limit <= Decimal('0.00'):
+            errors['credit_limit'] = 'Credit limit must be greater than zero.'
+        due_day = attrs.get('due_day', getattr(self.instance, 'due_day', None))
+        if due_day is not None and not 1 <= due_day <= 31:
+            errors['due_day'] = 'Due day must be between 1 and 31.'
+        initial_balance = attrs.get('initial_balance')
+        if initial_balance is not None and initial_balance < Decimal('0.00'):
+            errors['initial_balance'] = 'Initial balance must be zero or positive.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def create(self, validated_data):
+        from datetime import date as dt_date
+        initial_balance = validated_data.pop('initial_balance', None)
+        initial_balance_date = validated_data.pop('initial_balance_date', None) or dt_date.today()
+        if initial_balance is not None and validated_data.get('original_balance') is None:
+            validated_data['original_balance'] = initial_balance
+        debt = super().create(validated_data)
+        if initial_balance is not None:
+            DebtBalanceSnapshot.objects.create(
+                debt=debt,
+                recorded_date=initial_balance_date,
+                balance=initial_balance,
+                notes='Initial balance',
+            )
+        return debt
+
+    def _ordered_snapshots(self, obj):
+        return list(obj.snapshots.all())
+
+    def get_current_balance(self, obj):
+        snaps = self._ordered_snapshots(obj)
+        if snaps:
+            return _quantize_money(snaps[0].balance)
+        if obj.original_balance is not None:
+            return _quantize_money(obj.original_balance)
+        return '0.00'
+
+    def get_previous_balance(self, obj):
+        snaps = self._ordered_snapshots(obj)
+        if len(snaps) >= 2:
+            return _quantize_money(snaps[1].balance)
+        return None
+
+    def get_balance_change(self, obj):
+        snaps = self._ordered_snapshots(obj)
+        if len(snaps) >= 2:
+            return _quantize_money(snaps[0].balance - snaps[1].balance)
+        return None
+
+    def _baseline_balance(self, obj, snaps):
+        if obj.original_balance is not None:
+            return obj.original_balance
+        if snaps:
+            return snaps[-1].balance
+        return None
+
+    def get_paid_down_amount(self, obj):
+        snaps = self._ordered_snapshots(obj)
+        baseline = self._baseline_balance(obj, snaps)
+        if baseline is None:
+            return None
+        current = snaps[0].balance if snaps else baseline
+        return _quantize_money(baseline - current)
+
+    def get_paid_down_percent(self, obj):
+        snaps = self._ordered_snapshots(obj)
+        baseline = self._baseline_balance(obj, snaps)
+        if baseline is None or baseline <= Decimal('0.00'):
+            return None
+        current = snaps[0].balance if snaps else baseline
+        pct = ((baseline - current) / baseline) * Decimal('100')
+        return _quantize_money(pct)
+
+
+class RecurringExpenseSerializer(serializers.ModelSerializer):
+    subcategory_name = serializers.CharField(source='subcategory.name', read_only=True, allow_null=True)
+    budget_bucket = serializers.CharField(source='subcategory.budget_bucket', read_only=True, allow_null=True)
+    effective_monthly_cost = serializers.SerializerMethodField()
+    effective_annual_cost = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RecurringExpense
+        fields = (
+            'id',
+            'name',
+            'kind',
+            'amount',
+            'due_day',
+            'renewal_date',
+            'subcategory',
+            'subcategory_name',
+            'budget_bucket',
+            'auto_pay',
+            'is_active',
+            'notes',
+            'effective_monthly_cost',
+            'effective_annual_cost',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('created_at', 'updated_at')
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('Enter a name.')
+        return value
+
+    def validate(self, attrs):
+        errors = {}
+        amount = attrs.get('amount', getattr(self.instance, 'amount', None))
+        if amount is not None and amount <= Decimal('0.00'):
+            errors['amount'] = 'Amount must be greater than zero.'
+        due_day = attrs.get('due_day', getattr(self.instance, 'due_day', None))
+        if due_day is not None and not 1 <= due_day <= 31:
+            errors['due_day'] = 'Due day must be between 1 and 31.'
+        subcategory = attrs.get('subcategory', getattr(self.instance, 'subcategory', None))
+        if subcategory is not None:
+            if subcategory.scope != SubcategoryScope.BUDGET or subcategory.budget_bucket not in (
+                BudgetBucket.NEEDS,
+                BudgetBucket.WANTS,
+            ):
+                errors['subcategory'] = 'Choose a Needs or Wants budget subcategory.'
+            elif (self.instance is None or self.instance.subcategory_id != subcategory.pk) and not subcategory.is_active:
+                errors['subcategory'] = 'Choose an active subcategory.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def get_effective_monthly_cost(self, obj):
+        if obj.kind == RecurringExpense.Kind.ANNUAL_SUBSCRIPTION:
+            return _quantize_money(obj.amount / Decimal('12'))
+        return _quantize_money(obj.amount)
+
+    def get_effective_annual_cost(self, obj):
+        if obj.kind == RecurringExpense.Kind.ANNUAL_SUBSCRIPTION:
+            return _quantize_money(obj.amount)
+        return _quantize_money(obj.amount * Decimal('12'))
+
