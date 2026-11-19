@@ -4,11 +4,13 @@ PennyTracker is designed for importing transaction history, resolving what impor
 
 ## Step 1 — Configure your accounts
 
-An **Account** is the local ledger container for transactions from one account, such as `Example Checking`, `Example Savings`, or `Example Credit Card`. PennyTracker currently creates and edits Accounts in Django Admin, not in the web app. Follow [first-run setup](SETUP.md#create-the-first-admin-user-and-account) if you have not created an admin login yet.
+An **Account** is the local ledger container for transactions from one account, such as `Example Checking`, `Example Savings`, or `Example Credit Card`. Open **Accounts** in PennyTracker to create and manage them. See [first-run setup](SETUP.md#create-your-first-account).
 
-In Admin, create an Account with a name, optionally enter an Institution label, choose its account type, and leave **Is active** enabled if you want to import to it. Account types include Checking, Savings, Credit card, Loan, Investment, and Other. The institution name is only descriptive; it does not connect to a bank.
+Create an Account with a name, optionally enter an Institution label such as `Example Bank`, and choose its account type. Account types include Checking, Savings, Credit card, Loan, Investment, and Other. The institution name is only descriptive; it does not connect to a bank. Loan and Investment types are metadata only.
 
-**Is savings destination** is account metadata. It does not infer a Savings contribution or withdrawal. To include Savings activity in reports, classify the relevant transaction as a Transfer and explicitly assign a Savings effect and Savings Subcategory in Review.
+**Savings Destination** is optional metadata for Savings and Investment accounts. It does not infer a Savings contribution or withdrawal. To include Savings activity in reports, classify the relevant transaction as a Transfer and explicitly assign a Savings effect and Savings Subcategory in Review.
+
+Edit or rename an Account from the same screen. Archive an Account to remove it from new imports; its historical transactions and filters remain available. Reactivate it to import again. A rename changes the displayed Account name in historical views.
 
 ## Step 2 — Export a supported CSV
 

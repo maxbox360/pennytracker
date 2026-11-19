@@ -29,23 +29,17 @@ Compose builds the backend and frontend images. The backend runs Django migratio
 
 Keep that terminal open while using the app. Press `Ctrl-C` to stop the services. The SQLite database is stored in the Compose-managed `pennytracker-data` volume and remains when containers are stopped or recreated. Do not remove that volume if you want to keep its data.
 
-## Create the first admin user and account
+## Create your first account
 
-A fresh database has no admin login or Accounts. In a second terminal, from the repository root, create a Django Admin login:
-
-```sh
-docker compose -f docker-compose.yaml exec backend python manage.py createsuperuser
-```
-
-Follow the prompts, then sign in at <http://localhost:8000/admin/>. Under **Finance → Accounts**, choose **Add account**. The account fields are:
+A fresh database has no Accounts. Open **Accounts** in PennyTracker and choose **Add account**. The account fields are:
 
 - **Name**: a local label, such as `Example Checking`.
 - **Institution**: optional text label; it does not connect to that institution.
 - **Account type**: Checking, Savings, Credit card, Loan, Investment, or Other.
-- **Is savings destination**: account metadata only. It does not automatically make transfers Savings activity; Savings effects are explicitly assigned to individual transactions.
-- **Is active**: active accounts are available in the CSV import selector.
+- **Savings Destination**: optional metadata for Savings and Investment accounts. It does not automatically make transfers Savings activity; Savings effects are explicitly assigned to individual transactions.
+- New accounts are active and available in the CSV import selector. Archive or reactivate them in Accounts as needed.
 
-The web app does not currently have an Accounts management screen, so use Django Admin to create or edit Accounts.
+Django Admin remains available for development and support; it is not required for normal account setup.
 
 ## Create initial subcategories
 
@@ -56,8 +50,7 @@ You can add categories later, including while resolving a transaction in Review.
 ## Confirm the first launch
 
 - PennyTracker loads at <http://localhost:5173>.
-- Sign-in to Django Admin works at <http://localhost:8000/admin/>.
-- An Account created in Admin is available in **Transactions → Import CSV**.
+- An Account created in PennyTracker is available in **Transactions → Import CSV**.
 - The **Categories** and **Import CSV** workflows open in PennyTracker.
 
 **Seeing no transactions or reports is normal.** A new installation contains no personal ledger data. To populate it, export a CSV in a currently supported format from your financial institution and import it yourself; you do not type transactions one by one.
@@ -86,12 +79,12 @@ npm ci
 npm run dev -- --host 127.0.0.1
 ```
 
-The frontend is at <http://localhost:5173>; Django Admin is at <http://localhost:8000/admin/>. Create an admin login in another terminal from the repository root with `.venv/bin/python backend/manage.py createsuperuser`, then create an Account as described above. The native database is `backend/db.sqlite3` by default and is separate from the Docker-managed database.
+The frontend is at <http://localhost:5173>; Django Admin is at <http://localhost:8000/admin/>. Create an Account in PennyTracker as described above. The native database is `backend/db.sqlite3` by default and is separate from the Docker-managed database.
 
 ## Troubleshooting
 
 - **The ledger is empty:** This is the expected fresh-install state. Create an Account, then import a supported CSV.
-- **No account appears during import:** Create and save an Account in Django Admin, and ensure **Is active** is enabled.
+- **No account appears during import:** Create an Account in PennyTracker or reactivate an archived Account.
 - **A page does not load:** Check the Compose terminal or run `docker compose -f docker-compose.yaml ps`; the frontend uses port `5173` and the backend/Admin uses port `8000`.
 - **The backend reports a database or migration error:** Check its startup output or run `docker compose -f docker-compose.yaml logs backend`. Compose normally runs migrations automatically when the backend starts.
 - **Your CSV cannot be previewed:** Only the supported SoFi checking CSV structure is recognized today. See the [User Guide](USER_GUIDE.md) for its requirements.

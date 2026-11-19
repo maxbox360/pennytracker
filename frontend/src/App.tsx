@@ -4,6 +4,7 @@ import TransactionTable from './TransactionTable'
 import Categories from './Categories'
 import Rules from './Rules'
 import Reports from './Reports'
+import Accounts from './Accounts'
 import './App.css'
 
 type Account = { id: number; name: string; is_active: boolean }
@@ -120,13 +121,14 @@ function App() {
   const [reviewReason, setReviewReason] = useState('')
   const [reviewDates, setReviewDates] = useState({ start: '', end: '' })
   const [reportsVisited, setReportsVisited] = useState(false)
-  const [view, setView] = useState<'transactions' | 'review' | 'categories' | 'rules' | 'reports'>('transactions')
+  const [view, setView] = useState<'transactions' | 'review' | 'categories' | 'rules' | 'reports' | 'accounts'>('transactions')
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem('pennytracker-theme')
     return saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system'
   })
   const [showImport, setShowImport] = useState(false)
   const [accounts, setAccounts] = useState<Account[]>([])
+  const [accountsLoading, setAccountsLoading] = useState(false)
   const [accountId, setAccountId] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<Preview | null>(null)
@@ -141,15 +143,20 @@ function App() {
 
   useEffect(() => {
     if (!showImport) return
+    let cancelled = false
+    setAccountsLoading(true)
+    setAccounts([])
     apiFetch('/api/accounts/')
       .then(async (response) => {
         if (!response.ok) throw new Error(`Request failed (${response.status})`)
         const result: Account[] = await response.json()
-        setAccounts(result.filter((account) => account.is_active))
+        if (!cancelled) setAccounts(result.filter((account) => account.is_active))
       })
       .catch((loadError) => {
-        setImportError(loadError instanceof Error ? loadError.message : 'Unable to load accounts')
+        if (!cancelled) setImportError(loadError instanceof Error ? loadError.message : 'Unable to load accounts')
       })
+      .finally(() => { if (!cancelled) setAccountsLoading(false) })
+    return () => { cancelled = true }
   }, [showImport])
 
   function closeImport() {
@@ -231,6 +238,14 @@ function App() {
             Review
           </button>
           <button
+            className={`nav-item ${view === 'accounts' ? 'nav-item--active' : ''}`}
+            type="button"
+            aria-current={view === 'accounts' ? 'page' : undefined}
+            onClick={() => { closeImport(); setView('accounts') }}
+          >
+            Accounts
+          </button>
+          <button
             className={`nav-item ${view === 'categories' ? 'nav-item--active' : ''}`}
             type="button"
             aria-current={view === 'categories' ? 'page' : undefined}
@@ -275,12 +290,14 @@ function App() {
       <main className="main-content">
         <header className="page-header">
           <div>
-            <h1>{previewing ? 'Import preview' : view === 'review' ? 'Review' : view === 'categories' ? 'Categories' : view === 'rules' ? 'Rules' : view === 'reports' ? 'Reports' : 'Transactions'}</h1>
+            <h1>{previewing ? 'Import preview' : view === 'review' ? 'Review' : view === 'accounts' ? 'Accounts' : view === 'categories' ? 'Categories' : view === 'rules' ? 'Rules' : view === 'reports' ? 'Reports' : 'Transactions'}</h1>
             <p className="page-description">
               {previewing
                 ? 'Review the rows below, then confirm or close without importing.'
                 : view === 'review'
                 ? 'Resolve unknown classifications, uncategorized activity, and possible duplicates.'
+                : view === 'accounts'
+                  ? 'Manage accounts used to import and organize transactions.'
                 : view === 'categories'
                   ? 'Manage the subcategories used to organize transactions.'
                   : view === 'rules'
@@ -290,7 +307,7 @@ function App() {
                     : 'A clear view of activity across your accounts.'}
             </p>
           </div>
-          {view !== 'categories' && view !== 'rules' && (
+          {view !== 'categories' && view !== 'rules' && view !== 'accounts' && (
             <div className="page-actions">
               {!previewing && (
                 <button className="secondary-button" type="button" onClick={() => setReload((current) => current + 1)}>
@@ -316,6 +333,7 @@ function App() {
                     if (showImport) {
                       closeImport()
                     } else {
+                      setAccountsLoading(true)
                       setShowImport(true)
                       setImportResult(null)
                       setImportError('')
@@ -346,7 +364,12 @@ function App() {
                 <p>Select the destination account; the filename is kept for reference only.</p>
               </div>
             </div>
-            {!preview && (
+            {!preview && accountsLoading && <p>Loading accounts…</p>}
+            {!preview && !accountsLoading && !importError && accounts.length === 0 && <p>
+              You need an active account before importing transactions.{' '}
+              <button type="button" className="link-button" onClick={() => { closeImport(); setView('accounts') }}>Go to Accounts</button>
+            </p>}
+            {!preview && !accountsLoading && accounts.length > 0 && (
             <div className="import-controls">
               <label>
                 Account
@@ -385,7 +408,7 @@ function App() {
             </div>
             )}
 
-            {!preview && previewHint && !importError && <p className="import-hint">{previewHint}</p>}
+            {!preview && !accountsLoading && accounts.length > 0 && previewHint && !importError && <p className="import-hint">{previewHint}</p>}
             {confirmHint && <p className="import-hint" role="status">{confirmHint}</p>}
             {importError && <p className="message message--error" role="alert">{importError}</p>}
             {preview && (
@@ -492,6 +515,8 @@ function App() {
           ? null
           : view === 'categories'
           ? <Categories />
+          : view === 'accounts'
+          ? <Accounts />
           : view === 'rules'
             ? <Rules reload={reload} onChanged={() => setReload((current) => current + 1)} />
             : previewing
