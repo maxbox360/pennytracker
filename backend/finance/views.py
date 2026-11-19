@@ -74,6 +74,7 @@ from .accounting import (
 class AccountViewSet(ModelViewSet):
     queryset = Account.objects.all()
     serializer_class = AccountSerializer
+    http_method_names = ['get', 'post', 'put', 'patch', 'head', 'options']
 
 
 @api_view(['GET', 'PUT'])

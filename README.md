@@ -1,66 +1,39 @@
 # PennyTracker
 
-A local-only personal finance ledger. The first milestone provides Django/DRF with SQLite and a React/TypeScript frontend. The browser reads the ledger from the local API; add and edit records through Django admin.
+PennyTracker is a local personal-finance application for importing transaction CSVs, reviewing and categorizing activity, teaching transparent rules, and understanding spending over time.
 
-## Recommended: Docker Compose
+> **You do not enter every transaction manually.** The intended workflow is:
+> **CSV export → Import → Review → Rules → Reports**
 
-Install Docker Desktop, then from the repository root run:
+PennyTracker currently imports CSV files; it does not connect to bank accounts or use direct banking APIs. You export a supported file yourself and import it into a PennyTracker account.
 
-```sh
-docker compose -f docker-compose.yaml up
-```
+Personal-finance spreadsheets can become increasingly manual and difficult to keep consistent. PennyTracker provides a local, auditable workflow for importing transaction history, categorizing it consistently, and producing historical reports without requiring direct bank access.
 
-Open the Vite URL at `http://localhost:5173`. Django admin is at `http://localhost:8000/admin/`; create its first login in another terminal:
+## Local-first by design
 
-```sh
-docker compose -f docker-compose.yaml exec backend python manage.py createsuperuser
-```
+Financial records are stored in PennyTracker's local SQLite database. Docker Compose keeps that database in a local Docker-managed volume. PennyTracker does not need your bank username or password, and it does not include your financial data. A fresh installation starts with an empty ledger until you create accounts and import transactions. This is a local application, not a hosted service; the local setup is not a security guarantee for a machine that is shared or exposed to a network.
 
-Backend and frontend source directories are bind-mounted for reloads. Frontend packages are installed from the lockfile at startup, and SQLite data persists in the `pennytracker-data` named volume. Stop the services with `Ctrl-C`; use `docker compose -f docker-compose.yaml down` to stop and remove the containers while keeping the database volume.
+## What it supports
 
-The published ports are bound to localhost. This setup is for local development, not production deployment. If Python dependencies change, rebuild with `docker compose -f docker-compose.yaml up --build`; frontend dependencies are refreshed from the lockfile at each startup.
+- CSV import preview and confirmation, with exact-file checks and review of overlapping or possible-duplicate rows.
+- Account creation and management in the app, including archive and reactivation.
+- A transaction ledger and Review workflow for resolving classifications, categories, and duplicate questions.
+- Editable Needs, Wants, Savings, and Other Inflows subcategories.
+- Explicit, deterministic description-matching rules.
+- All Time, calendar-year, calendar-month, YTD, 7-day, 30-day, and custom-range reports with transaction drilldowns.
+- Configurable Needs/Wants/Savings allocation targets and Light, Dark, and System themes.
 
-## Reports
+PennyTracker's current budgeting workflow centers on **Needs**, **Wants**, and actual **Savings** activity. Allocation targets are configurable; this is not intended as a universal budgeting framework.
 
-Reports opens at All Time and retains the All Time → Year → Month hierarchy. The compact range controls select YTD (January 1 through today), Last 30 days (today and the previous 29 days), Last 7 days (today and the previous 6 days), or a custom From/To range. Both dates are inclusive and use the local calendar date; empty ranges are valid. Every report, completeness count, trend, and drilldown uses `Transaction.date`, not posted dates or import metadata.
+The built-in CSV parser currently supports one SoFi checking export format, not arbitrary bank or card CSVs. See the [User Guide](docs/USER_GUIDE.md) for the format requirements and current import behavior.
 
-Range reports reuse the same Decimal accounting and current allocation targets as the calendar reports. Percentages divide aggregate range allocations by aggregate Income, not an average of period percentages. Trends show daily points for up to 30 days and monthly points for longer ranges, with partial edge months restricted to the selected dates. Empty periods and periods with unresolved blockers are identified separately.
+## Requirements
 
-The allocation donut uses the monthly report's rules: Needs, Wants, Savings Contributions, and non-negative Remaining partition Income; when allocations exceed Income it shows their share of allocations and the excess. Negative allocation buckets make the chart unavailable rather than distorting values. Incomplete data is labeled partial. Summary lines, subcategories, and donut segments open server-paginated transaction contributions, including a Remaining reconciliation; Review links retain the selected report dates.
+For normal use, install **Git** and **Docker Compose v2** (included with Docker Desktop, or available as the Docker Compose plugin with Docker Engine). Python and Node.js are only needed if you choose to run or develop the services natively.
 
-## Import a CSV
+## New here?
 
-Create an active account in Django admin, open PennyTracker, and choose **Import CSV**. Select the destination account and a supported CSV file (maximum 20 MiB), preview it, then confirm. The original filename is audit metadata only; the selected account and CSV contents determine the import. The first importer accepts posted SoFi checking CSVs, and exact file re-imports to the same account are blocked.
+1. Follow [Installation and first-run setup](docs/SETUP.md).
+2. Read the [User Guide](docs/USER_GUIDE.md) for the import, Review, Rules, and Reports workflow.
 
-## Run without Docker
-
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python backend/manage.py migrate
-.venv/bin/python backend/manage.py runserver 127.0.0.1:8000
-```
-
-In another terminal, run `cd frontend && npm install && npm run dev`, then open the Vite URL shown.
-
-## Checks
-
-```sh
-.venv/bin/python backend/manage.py test finance
-cd frontend && npm run build
-```
-
-The optional Review browser regression requires Node 22+ and Chrome. It uses synthetic fixtures
-and a **disposable empty database**; from the repository root, run:
-
-```sh
-export DJANGO_DB_PATH="$(mktemp -d)/pennytracker.sqlite3"
-.venv/bin/python backend/manage.py migrate
-PENNYTRACKER_BROWSER_FIXTURES=1 .venv/bin/python backend/manage.py shell < frontend/tests/review-browser-fixtures.py
-DJANGO_CSRF_TRUSTED_ORIGINS=http://127.0.0.1:15173 .venv/bin/python backend/manage.py runserver 127.0.0.1:18080
-```
-
-In another terminal, run `cd frontend && VITE_API_PROXY_TARGET=http://127.0.0.1:18080 npm run dev -- --host 127.0.0.1 --port 15173 --strictPort`.
-Open that frontend in Chrome with `--remote-debugging-port=19222` and a separate temporary Chrome profile,
-then run `npm --prefix frontend run test:review-browser` from the repository root. The fixture script refuses
-to seed a nonempty ledger; the browser test modifies its synthetic data and expects a fresh seed.
+Development checks and the optional synthetic browser regression are documented in [Development and testing](docs/DEVELOPMENT.md).
