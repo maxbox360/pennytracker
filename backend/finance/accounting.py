@@ -306,7 +306,10 @@ def _complete_summary(raw, targets):
             'net_savings_activity',
             contributions - withdrawals,
         ),
-        'remaining': {'amount': money(remaining)},
+        'remaining': {
+            'amount': money(remaining),
+            'actual_percent': percentage(remaining / income * HUNDRED) if income > 0 else None,
+        },
     }
 
 

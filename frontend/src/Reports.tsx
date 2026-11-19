@@ -17,7 +17,7 @@ type Summary = {
   savings_contributions: AllocationValue
   savings_withdrawals: SummaryValue
   net_savings_activity: SummaryValue
-  remaining: { amount: string }
+  remaining: { amount: string; actual_percent: string | null }
 }
 type BreakdownRow = {
   subcategory: number | null
@@ -222,12 +222,13 @@ function SummaryTable({
             const allocation = ['needs', 'wants', 'savings_contributions'].includes(metric)
               ? value as AllocationValue
               : null
+            const actualPercent = 'actual_percent' in value ? value.actual_percent : null
             const amount = typeof value.amount === 'string' ? value.amount : '0.00'
             return (
               <tr key={metric} className={metric === 'remaining' ? 'remaining-row' : undefined}>
                 <th scope="row"><button className="report-link" type="button" onClick={() => openDrill(metric, metricLabels[metric])}>{metricLabels[metric]}</button></th>
                 <td className="amount-cell">{formatAmount(amount)}</td>
-                <td>{allocation?.actual_percent === null || !allocation ? '—' : `${allocation.actual_percent}%`}</td>
+                <td>{actualPercent === null ? '—' : `${actualPercent}%`}</td>
                 <td>{allocation ? `${allocation.target_percent}%${allocation.target_amount === null ? '' : ` · ${formatAmount(allocation.target_amount)}`}` : '—'}</td>
                 <td>{allocation?.variance_points === null || !allocation ? '—' : `${!allocation.variance_points.startsWith('-') && allocation.variance_points !== '0.00' ? '+' : ''}${allocation.variance_points} pts`}</td>
                 <td>{'transaction_count' in value ? value.transaction_count : '—'}</td>

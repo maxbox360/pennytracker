@@ -393,6 +393,17 @@
   font-variant-numeric: tabular-nums;
 }
 
+.report-summary :is(th, td):not(:first-child),
+.report-breakdowns :is(th, td):not(:first-child),
+.report-drilldown :is(th, td):nth-last-child(-n + 2),
+.historical-table-section :is(th, td):not(:first-child, :last-child),
+.historical-series-table :is(th, td):not(:first-child, :last-child) {
+  padding-right: 14px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .remaining-row {
   background: var(--surface-alt);
   font-weight: 650;
@@ -755,6 +766,7 @@
 
 .report-breakdowns > section {
   min-width: 0;
+  overflow-x: auto;
   padding-top: 9px;
 }
 
