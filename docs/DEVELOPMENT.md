@@ -45,3 +45,13 @@ npm --prefix frontend run test:review-browser
 ```
 
 The test expects the fixture database to be freshly seeded. Its setup and fixture are specifically for browser regression, not for creating or populating a normal user installation.
+
+## Optional Accounts browser regression
+
+Use the same isolated backend, frontend, and Chrome setup above, but start with a **fresh migrated database without Review fixtures**. The test creates accounts and imports a synthetic transaction:
+
+```sh
+npm --prefix frontend run test:accounts-browser
+```
+
+Never run it against a personal database. The test requires an empty Accounts list and modifies the disposable database.

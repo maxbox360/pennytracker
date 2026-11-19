@@ -16,6 +16,7 @@ Financial records are stored in PennyTracker's local SQLite database. Docker Com
 ## What it supports
 
 - CSV import preview and confirmation, with exact-file checks and review of overlapping or possible-duplicate rows.
+- Account creation and management in the app, including archive and reactivation.
 - A transaction ledger and Review workflow for resolving classifications, categories, and duplicate questions.
 - Editable Needs, Wants, Savings, and Other Inflows subcategories.
 - Explicit, deterministic description-matching rules.

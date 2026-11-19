@@ -56,6 +56,33 @@ class AccountSerializer(serializers.ModelSerializer):
             'is_savings_destination',
             'is_active',
         )
+        extra_kwargs = {'account_type': {'required': True}}
+
+    def validate(self, attrs):
+        instance = self.instance
+        name = attrs.get('name', instance.name if instance else '').strip()
+        active = attrs.get('is_active', instance.is_active if instance else True)
+        name_changed = instance is None or name != instance.name.strip()
+        reactivating = instance is not None and not instance.is_active and active
+        if active and (name_changed or reactivating):
+            accounts = Account.objects.filter(is_active=True)
+            if instance:
+                accounts = accounts.exclude(pk=instance.pk)
+            if any(account.name.strip().casefold() == name.casefold() for account in accounts):
+                raise serializers.ValidationError({'name': 'An active account with this name already exists.'})
+
+        account_type = attrs.get('account_type', instance.account_type if instance else Account.Type.CHECKING)
+        destination = attrs.get('is_savings_destination', instance.is_savings_destination if instance else False)
+        changed = (
+            instance is None
+            or account_type != instance.account_type
+            or destination != instance.is_savings_destination
+        )
+        if changed and destination and account_type not in (Account.Type.SAVINGS, Account.Type.INVESTMENT):
+            raise serializers.ValidationError({
+                'is_savings_destination': 'Only Savings and Investment accounts can be Savings Destinations.'
+            })
+        return attrs
 
 
 class BudgetTargetSettingsSerializer(serializers.ModelSerializer):
